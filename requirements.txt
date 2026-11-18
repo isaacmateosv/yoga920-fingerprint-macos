@@ -6,4 +6,4 @@ numpy>=2.2,<3
 opencv-python-headless>=4.10,<6
 cryptography>=46
 pyusb>=1.2.1,<2
-libusb-package>=1.0.26,<2
+libusb-package>=1.0.30.1,<2
