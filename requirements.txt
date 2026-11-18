@@ -2,7 +2,7 @@
 # in range, so security fixes arrive without editing this file. Upper bounds only at the next major
 # version (possible API breaks). Lower bounds = oldest versions tested with yoga-fp.
 # Prebuilt wheels only (install.sh passes --only-binary=:all:).
-numpy>=2.2,<3
+numpy>=2.5.5,<3
 opencv-python-headless>=4.10,<6
 cryptography>=46
 pyusb>=1.2.1,<2
