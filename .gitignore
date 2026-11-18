@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+pam/pam_yogafp.so
+pam/pamcheck
+# never commit firmware or biometric data
+*.xpfwext
+*.exe
+*.enc
+*.npy
+*.npz
+*.bin
+*.png
+venv/
+app/build/
+run-data/
