@@ -20,5 +20,7 @@ jobs:
         run: make -C pam
       - name: Build menu bar app
         run: bash app/build.sh
+      - name: Build authorization plugin
+        run: make -C authplugin
       - name: Lint installer
         run: bash -n install.sh

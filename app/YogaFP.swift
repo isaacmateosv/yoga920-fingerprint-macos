@@ -375,7 +375,7 @@ struct AuthPanelView: View {
                 .foregroundStyle(m.authPhase == .success ? .green : m.authPhase == .failure ? .red : .accentColor)
                 .symbolEffect(.pulse, isActive: m.authPhase == .working)
             VStack(alignment: .leading, spacing: 4) {
-                Text("\(m.authService ?? "sudo") is requesting authentication").font(.headline)
+                Text(m.authService == "admin" ? "An app wants administrator rights" : "\(m.authService ?? "sudo") is requesting authentication").font(.headline)
                 Text(m.authMessage).font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)

@@ -13,3 +13,5 @@ pam/pamcheck
 venv/
 app/build/
 run-data/
+authplugin/YogaFPAuth.bundle/
+authplugin/authtest

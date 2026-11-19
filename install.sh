@@ -5,6 +5,9 @@
 #   sudo ./install.sh install --lenovo-exe /path/to/n1cgn08w.exe      (needs `innoextract`)
 #   sudo ./install.sh enable-sudo        # after enrolling: use the fingerprint for sudo
 #   sudo ./install.sh disable-sudo
+#   sudo ./install.sh admin-test         # try fingerprint for admin dialogs on a private test right (safe)
+#   sudo ./install.sh enable-admin       # use it for real admin dialogs (backup + automatic rollback)
+#   sudo ./install.sh disable-admin      # restore the original admin-dialog definitions
 #   sudo ./install.sh update             # upgrade dependencies (security fixes) and restart
 #   sudo ./install.sh uninstall [--purge]   # --purge also deletes fingerprint data and the key
 #   ./install.sh status
@@ -23,6 +26,10 @@ PLIST=/Library/LaunchDaemons/$LABEL.plist
 SOCK=/var/run/yogafpd.sock
 SUDO_LOCAL=/etc/pam.d/sudo_local
 APP=/Applications/YogaFP.app
+AUTHPLUGIN=/Library/Security/SecurityAgentPlugins/YogaFPAuth.bundle
+AUTHDB_BACKUP="$DATA/authdb-backup"
+ADMIN_RIGHTS=(system.privilege.admin system.install.software system.preferences)
+TEST_RIGHT=com.yogafp.test
 CHECK_SVC=/etc/pam.d/yogafp-check
 PAM_LINE="auth       sufficient     $PAMMOD"
 
@@ -207,9 +214,10 @@ cmd_disable_sudo() {
 cmd_uninstall() {
   need_root
   cmd_disable_sudo                       # always first: never leave sudo pointing at a missing module
+  cmd_disable_admin                      # and never leave admin dialogs pointing at a missing plugin
   launchctl bootout system/$LABEL 2>/dev/null || true
   pkill -x YogaFP 2>/dev/null || true
-  rm -f "$PLIST" "$BIN" "$PAMMOD" "$CHECK_SVC" "$SOCK"; rm -rf "$APP"
+  rm -f "$PLIST" "$BIN" "$PAMMOD" "$CHECK_SVC" "$SOCK"; rm -rf "$APP" "$AUTHPLUGIN"
   rm -rf "$PREFIX"
   if [[ "${1:-}" == --purge ]]; then
     rm -rf "$DATA"
@@ -230,6 +238,103 @@ cmd_update() {   # upgrade Python dependencies to the newest stable releases in 
   "$PREFIX/venv/bin/python" -m pip list --format=freeze 2>/dev/null | grep -iE '^(numpy|opencv|cryptography|pyusb|libusb)'
   launchctl kickstart -k system/$LABEL
   wait_socket && say "updated and restarted" || die "daemon did not restart; see /var/log/yogafpd.log"
+}
+
+# ---------------------------------------------------------------- admin dialogs (authorization plugin)
+right_def() {   # $1 = shared (true/false), $2 = timeout seconds -> evaluate-mechanisms right using YogaFP
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>class</key><string>evaluate-mechanisms</string>
+  <key>comment</key><string>yoga-fp: fingerprint, then password. Restore with: sudo ./install.sh disable-admin</string>
+  <key>mechanisms</key><array>
+    <string>YogaFP:fingerprint,privileged</string>
+    <string>YogaFP:password</string>
+  </array>
+  <key>shared</key><$1/>
+  <key>timeout</key><integer>$2</integer>
+  <key>tries</key><integer>10000</integer>
+  <key>version</key><integer>1</integer>
+</dict></plist>
+EOF
+}
+
+install_authplugin() {
+  command -v cc >/dev/null || die "a C compiler is required (xcode-select --install)"
+  local b; b="$(mktemp -d)"; cp "$HERE/authplugin/"* "$b/"
+  make -s -C "$b" >/dev/null || { rm -rf "$b"; die "building the authorization plugin failed"; }
+  rm -rf "$AUTHPLUGIN"; cp -R "$b/YogaFPAuth.bundle" "$AUTHPLUGIN"
+  chown -R root:wheel "$AUTHPLUGIN"; chmod -R go-w "$AUTHPLUGIN"
+  install -m 755 -o root -g wheel "$b/authtest" "$PREFIX/authtest"
+  rm -rf "$b"
+}
+
+cmd_admin_test() {
+  need_root
+  [[ -S "$SOCK" ]] || die "yoga-fp is not installed/running"
+  local user="${SUDO_USER:-}"; [[ -n "$user" && "$user" != root ]] || die "run as: sudo $0 admin-test (from your user account)"
+  sudo -u "$user" "$BIN" status | grep -q '"enrolled": true' || die "$user has no enrolled fingerprint"
+  say "Installing the authorization plugin: $AUTHPLUGIN"
+  install_authplugin
+  right_def false 0 | security authorizationdb write "$TEST_RIGHT" >/dev/null 2>&1 || die "could not create the test right"
+  say "Test 1/2: a test admin request is shown now. TOUCH THE SENSOR (do not type a password)."
+  local r1; r1="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"; echo "    -> $r1"
+  say "Test 2/2: again, but this time press 'Use Password' in the YogaFP panel, then type your password."
+  local r2; r2="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"; echo "    -> $r2"
+  security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1 || true
+  if [[ "$r1" == granted && "$r2" == granted ]]; then
+    date > "$DATA/admin-test-passed"; chmod 600 "$DATA/admin-test-passed"
+    say "Both paths work. Real admin dialogs are unchanged; enable them with: sudo $0 enable-admin"
+  else
+    rm -f "$DATA/admin-test-passed"
+    warn "test did not pass (fingerprint: $r1, password: $r2). Nothing system-wide was changed."
+    warn "details: log show --last 5m --predicate 'eventMessage CONTAINS \"YogaFPAuth\"'"
+    exit 1
+  fi
+}
+
+cmd_enable_admin() {
+  need_root
+  [[ -f "$DATA/admin-test-passed" ]] || die "run 'sudo $0 admin-test' first (it must pass)"
+  [[ -d "$AUTHPLUGIN" ]] || die "plugin missing; run admin-test again"
+  local user="${SUDO_USER:-}"; [[ -n "$user" && "$user" != root ]] || die "run as: sudo $0 enable-admin (from your user account)"
+  mkdir -p "$AUTHDB_BACKUP"; chmod 700 "$AUTHDB_BACKUP"
+  local r shared timeout
+  for r in "${ADMIN_RIGHTS[@]}"; do
+    if [[ ! -f "$AUTHDB_BACKUP/$r.plist" ]]; then           # first enable: keep the pristine definition
+      security authorizationdb read "$r" > "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || die "could not back up $r"
+    fi
+  done
+  say "Original definitions backed up to $AUTHDB_BACKUP"
+  for r in "${ADMIN_RIGHTS[@]}"; do
+    shared=$(/usr/libexec/PlistBuddy -c "Print :shared" "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || true)
+    timeout=$(/usr/libexec/PlistBuddy -c "Print :timeout" "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || true)
+    [[ "$shared" == true ]] || shared=false
+    [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=0
+    right_def "$shared" "$timeout" | security authorizationdb write "$r" >/dev/null 2>&1 || { cmd_disable_admin; die "writing $r failed; restored"; }
+  done
+  say "Self-check: an admin request appears now - touch the sensor (or use your password)."
+  local res; res="$(sudo -u "$user" "$PREFIX/authtest" system.privilege.admin 2>&1 || true)"; echo "    -> $res"
+  if [[ "$res" != granted ]]; then
+    warn "self-check failed ($res); restoring the original definitions"
+    cmd_disable_admin
+    exit 1
+  fi
+  say "Enabled for: ${ADMIN_RIGHTS[*]}. Your password always works in the dialog."
+  say "Undo anytime with: sudo $0 disable-admin   (sudo with your password always works)"
+}
+
+cmd_disable_admin() {
+  need_root
+  local r n=0
+  for r in "${ADMIN_RIGHTS[@]}"; do
+    if [[ -f "$AUTHDB_BACKUP/$r.plist" ]]; then
+      security authorizationdb write "$r" < "$AUTHDB_BACKUP/$r.plist" >/dev/null 2>&1 && n=$((n+1)) || warn "could not restore $r"
+    fi
+  done
+  security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1 || true
+  say "restored $n admin-dialog definition(s)"
 }
 
 cmd_status() {
@@ -254,6 +359,9 @@ case "$cmd" in
   disable-sudo) cmd_disable_sudo ;;
   uninstall) cmd_uninstall "${PURGE:-}" ;;
   update) cmd_update ;;
+  admin-test) cmd_admin_test ;;
+  enable-admin) cmd_enable_admin ;;
+  disable-admin) cmd_disable_admin ;;
   status) cmd_status ;;
   *) sed -n '2,12p' "$0"; exit 1 ;;
 esac
