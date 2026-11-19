@@ -101,6 +101,22 @@ mostly read-only investigation before anything was written to the sensor.
 
 ## Install
 
+### Installer package (easiest, offline)
+
+`packaging/make-pkg.sh` builds `dist/YogaFP-<version>.pkg` (and a `.dmg` with the package, an uninstaller and this
+README). Everything is prebuilt and a private Python runtime with all dependencies is bundled, so the target Mac
+needs **no Xcode, Python or internet** (Intel Macs, macOS 14+). The package is unsigned: right-click → Open.
+
+After installing, the **YogaFP Setup Assistant** opens from the menu bar icon: enroll your finger, turn on sudo,
+turn on admin dialogs (private test first), start at login. Each step uses the standard admin prompt.
+
+The Lenovo firmware is not in the public package; the sensor keeps its firmware and pairing across macOS
+reinstalls on the same Mac, so it is only needed for a sensor that was never set up. For personal disaster
+recovery, `packaging/make-pkg.sh --fwext 6_07f_Lenovo.xpfwext` builds a `-personal` package that includes it
+(do not redistribute it). Note: a full wipe also deletes your encrypted enrollment and its key, so you enroll again.
+
+### From source
+
 ```bash
 sudo ./install.sh install --lenovo-exe ~/Downloads/n1cgn08w.exe
 sudo yogafp grant-enroll && yogafp enroll        # guided: 25 touches over 7 regions of the fingertip
@@ -117,6 +133,7 @@ of a false accept). Adding or removing one needs a touch from an already-enrolle
 
 Tuning: `sudo yogafp set-threshold N` (default 10). Other commands: `sudo ./install.sh update`, `yogafp verify`, `yogafp add 5` (more touches for an area that fails), `yogafp delete`,
 `./install.sh status`, `sudo ./install.sh disable-sudo`, `sudo ./install.sh uninstall [--purge]`.
+After installing, the same commands are available as `sudo /usr/local/libexec/yoga-fp/yogafp-admin.sh ...`.
 
 ## Admin dialogs (optional)
 

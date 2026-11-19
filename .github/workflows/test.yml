@@ -22,5 +22,5 @@ jobs:
         run: bash app/build.sh
       - name: Build authorization plugin
         run: make -C authplugin
-      - name: Lint installer
-        run: bash -n install.sh
+      - name: Lint installer and package builder
+        run: bash -n install.sh && bash -n packaging/make-pkg.sh

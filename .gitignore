@@ -15,3 +15,4 @@ app/build/
 run-data/
 authplugin/YogaFPAuth.bundle/
 authplugin/authtest
+dist/

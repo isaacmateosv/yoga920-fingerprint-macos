@@ -309,7 +309,8 @@ cmd_uninstall() {
   launchctl bootout system/$LABEL 2>/dev/null || true
   pkill -x YogaFP 2>/dev/null || true
   rm -f "$PLIST" "$BIN" "$PAMMOD" "$CHECK_SVC" "$SOCK"; rm -rf "$APP" "$AUTHPLUGIN"
-  rm -rf "$PREFIX"
+  rm -rf "$PREFIX" /usr/local/share/yoga-fp-installer
+  pkgutil --forget com.yogafp.pkg >/dev/null 2>&1 || true     # package receipt, if installed from the .pkg
   if [[ "${1:-}" == --purge ]]; then
     rm -rf "$DATA"
     security delete-generic-password -a root -s yoga-fp-template-key /Library/Keychains/System.keychain >/dev/null 2>&1 || true
