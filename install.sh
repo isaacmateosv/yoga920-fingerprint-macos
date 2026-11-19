@@ -270,6 +270,10 @@ install_authplugin() {
   rm -rf "$b"
 }
 
+plugin_log_since() {   # $1 = start timestamp -> plugin log lines since then
+  log show --start "$1" --style compact --predicate 'subsystem == "com.yogafp.authplugin"' 2>/dev/null | grep -v '^Timestamp' || true
+}
+
 cmd_admin_test() {
   need_root
   [[ -S "$SOCK" ]] || die "yoga-fp is not installed/running"
@@ -278,18 +282,34 @@ cmd_admin_test() {
   say "Installing the authorization plugin: $AUTHPLUGIN"
   install_authplugin
   right_def false 0 | security authorizationdb write "$TEST_RIGHT" >/dev/null 2>&1 || die "could not create the test right"
-  say "Test 1/2: a test admin request is shown now. TOUCH THE SENSOR (do not type a password)."
-  local r1; r1="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"; echo "    -> $r1"
-  say "Test 2/2: again, but this time press 'Use Password' in the YogaFP panel, then type your password."
-  local r2; r2="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"; echo "    -> $r2"
+  local def; def="$(security authorizationdb read "$TEST_RIGHT" 2>/dev/null | grep -c 'YogaFP:' || true)"
+  [[ "$def" == 2 ]] || { security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1; die "test right was not stored as expected (found $def YogaFP mechanisms)"; }
+  say "Test right $TEST_RIGHT created and verified (2 YogaFP mechanisms)."
+
+  local t1 r1 l1 t2 r2 l2
+  t1="$(date '+%Y-%m-%d %H:%M:%S')"
+  say "Test 1/2: TOUCH THE SENSOR when the YogaFP panel appears (do not type a password)."
+  r1="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"; sleep 2
+  l1="$(plugin_log_since "$t1")"
+  echo "    result: $r1"; echo "$l1" | sed -n 's/.*auth\] /    plugin: /p' | tail -5
+  t2="$(date '+%Y-%m-%d %H:%M:%S')"
+  say "Test 2/2: press 'Use Password' in the YogaFP panel, then type your password in the dialog."
+  r2="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"; sleep 2
+  l2="$(plugin_log_since "$t2")"
+  echo "    result: $r2"; echo "$l2" | sed -n 's/.*auth\] /    plugin: /p' | tail -5
   security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1 || true
-  if [[ "$r1" == granted && "$r2" == granted ]]; then
+
+  local ok1=no ok2=no
+  [[ "$r1" == granted ]] && grep -q "fingerprint verified" <<<"$l1" && ok1=yes
+  [[ "$r2" == granted ]] && grep -q "password accepted" <<<"$l2" && ok2=yes
+  if [[ $ok1 == yes && $ok2 == yes ]]; then
     date > "$DATA/admin-test-passed"; chmod 600 "$DATA/admin-test-passed"
-    say "Both paths work. Real admin dialogs are unchanged; enable them with: sudo $0 enable-admin"
+    say "PASS: fingerprint path and password path both went through the plugin."
+    say "Real admin dialogs are unchanged; enable them with: sudo $0 enable-admin"
   else
     rm -f "$DATA/admin-test-passed"
-    warn "test did not pass (fingerprint: $r1, password: $r2). Nothing system-wide was changed."
-    warn "details: log show --last 5m --predicate 'eventMessage CONTAINS \"YogaFPAuth\"'"
+    warn "not passed (fingerprint path: $ok1, password path: $ok2). Nothing system-wide was changed."
+    grep -q "plugin loaded\|invoked" <<<"$l1$l2" || warn "the plugin never ran: macOS did not load it for the test right"
     exit 1
   fi
 }

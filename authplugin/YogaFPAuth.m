@@ -20,7 +20,7 @@
 #include <grp.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <syslog.h>
+#include <os/log.h>
 #include <unistd.h>
 
 #define SOCK_PATH "/var/run/yogafpd.sock"
@@ -38,11 +38,18 @@ typedef struct {
     volatile int deactivated;
 } Mech;
 
+static os_log_t yfp_log(void) {
+    static os_log_t l; static dispatch_once_t once;
+    dispatch_once(&once, ^{ l = os_log_create("com.yogafp.authplugin", "auth"); });
+    return l;
+}
+
+// Visible with: log show --predicate 'subsystem == "com.yogafp.authplugin"'   (no secrets are logged)
 static void logmsg(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
-    syslog(LOG_AUTH | LOG_NOTICE, "YogaFPAuth: %s", s.UTF8String);
+    os_log(yfp_log(), "%{public}s", s.UTF8String);
 }
 
 // ------------------------------------------------------------------ helpers
@@ -160,6 +167,7 @@ static void invoke_password(Mech *m) {
     if ([verified isEqualToString:@"1"] && vuser.length) {
         struct passwd *p = getpwnam(vuser.UTF8String);
         if (p && user_is_admin(p->pw_uid)) {
+            logmsg(@"allowing: fingerprint verified for %@", vuser);
             set_identity(m, vuser, p->pw_uid, p->pw_gid);
             m->plugin->cb->SetResult(m->engine, kAuthorizationResultAllow);
             return;
@@ -199,6 +207,7 @@ static void invoke_password(Mech *m) {
             uid_t uid; gid_t gid;
             NSString *user = [u.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
             if (user.length && password_ok(user, pw.stringValue, &uid, &gid)) {
+                logmsg(@"password accepted for %@", user);
                 set_identity(m, user, uid, gid);
                 m->plugin->cb->SetResult(m->engine, kAuthorizationResultAllow);
                 return;
@@ -229,6 +238,7 @@ static OSStatus MechanismCreate(AuthorizationPluginRef inPlugin, AuthorizationEn
 static OSStatus MechanismInvoke(AuthorizationMechanismRef inMechanism) {
     Mech *m = (Mech *)inMechanism;
     @autoreleasepool {
+        logmsg(@"invoked %s mechanism (uid %d)", m->kind == 0 ? "fingerprint" : "password", (int)getuid());
         if (m->kind == 0) invoke_fingerprint(m); else invoke_password(m);
     }
     return errAuthorizationSuccess;
@@ -262,6 +272,7 @@ OSStatus AuthorizationPluginCreate(const AuthorizationCallbacks *callbacks, Auth
     Plugin *p = calloc(1, sizeof(Plugin));
     if (!p) return errAuthorizationInternal;
     p->cb = callbacks;
+    logmsg(@"plugin loaded (uid %d)", (int)getuid());
     *outPlugin = p;
     *outPluginInterface = &gInterface;
     return errAuthorizationSuccess;
