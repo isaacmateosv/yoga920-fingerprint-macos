@@ -82,6 +82,44 @@ get_fwext() {   # $1 = output path
   [[ "$(shasum -a 256 "$out" | cut -d' ' -f1)" == "$FWEXT_SHA256" ]] || { rm -f "$out"; die "firmware file checksum mismatch"; }
 }
 
+# Private, root-owned copy of the Python runtime (python.org framework builds): the daemon must not run on a
+# runtime that admin-group code can modify. Trimmed (no tests/Tk/docs), every absolute library link rewritten to
+# @loader_path, re-signed ad hoc. Dependencies are installed into it directly (no venv). Falls back to a venv on
+# non-framework Pythons (e.g. Homebrew) with a warning.
+make_runtime() {   # $1 = source python, $2 = destination dir
+  local py="$1" dest="$2" base
+  base="$("$py" -I -c 'import sys; print(sys.base_prefix)')"
+  if [[ ! -f "$base/Python" ]]; then return 1; fi
+  local stamp; stamp="$base $(shasum -a 256 "$base/Python" | cut -d' ' -f1)"
+  if [[ -f "$PREFIX/runtime/.yogafp-runtime" && "$(cat "$PREFIX/runtime/.yogafp-runtime")" == "$stamp" ]]; then
+    mv "$PREFIX/runtime" "$dest"; say "Python runtime: reusing the private copy"; return 0
+  fi
+  say "Python runtime: building a private root-owned copy (one time, ~140 MB)"
+  local v; v="$(basename "$base")"
+  rsync -a --exclude "lib/python$v/test" --exclude "lib/python$v/idlelib" --exclude "lib/python$v/tkinter" \
+    --exclude "lib/python$v/turtledemo" --exclude "lib/python$v/site-packages/*" --exclude share --exclude Frameworks \
+    --exclude include --exclude __pycache__ --exclude _CodeSignature --exclude "lib/python$v/lib-dynload/_tkinter*" \
+    "$base/" "$dest/"
+  local f d dep rel idl
+  while IFS= read -r f; do
+    [[ -L "$f" ]] && continue
+    file "$f" | grep -q Mach-O || continue
+    d="$(dirname "$f")"
+    for dep in $(otool -L "$f" | tail -n +2 | awk '{print $1}' | grep "^$base/" || true); do
+      rel="$("$py" -I -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$dest${dep#$base}" "$d")"
+      install_name_tool -change "$dep" "@loader_path/$rel" "$f" 2>/dev/null || true
+    done
+    idl="$(otool -D "$f" 2>/dev/null | tail -n +2)"
+    [[ "$idl" == "$base/"* ]] && install_name_tool -id "@rpath/$(basename "$idl")" "$f" 2>/dev/null
+    codesign --force -s - "$f" 2>/dev/null || true
+  done < <(find "$dest" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib' -o -name Python \))
+  if DYLD_PRINT_LIBRARIES=1 "$dest/bin/python3" -I -c 'import ssl, sqlite3, ctypes' 2>&1 | grep -q "$base/"; then
+    rm -rf "$dest"; warn "relocated runtime still references $base; falling back"; return 1
+  fi
+  "$dest/bin/python3" -I -m ensurepip >/dev/null 2>&1 || { rm -rf "$dest"; return 1; }
+  echo "$stamp" > "$dest/.yogafp-runtime"
+}
+
 wait_socket() {   # until the daemon actually answers (a stale socket file is not enough)
   for _ in $(seq 1 90); do "$BIN" status >/dev/null 2>&1 && return 0; sleep 0.5; done; return 1
 }
@@ -92,10 +130,6 @@ cmd_install() {
   sensor_present || die "Synaptics 06cb:0081 not found on USB"
   local py; py="$(find_python)"
   say "Python: $py ($("$py" -V 2>&1))"
-  if [[ -n "$(find "$(dirname "$(dirname "$("$py" -c 'import sys;print(sys.executable)')")")" -maxdepth 0 -perm -g+w 2>/dev/null)" ]]; then
-    warn "your Python runtime is group-writable (normal for python.org/Homebrew). yoga-fp's own code is root-owned,"
-    warn "but code running as an admin user could still alter the runtime. See README > Security."
-  fi
 
   say "Installing to $PREFIX"
   launchctl bootout system/$LABEL 2>/dev/null || true
@@ -103,12 +137,12 @@ cmd_install() {
   rm -rf "$PREFIX.new"; mkdir -p "$PREFIX.new"
   cp -R "$HERE/yogafp" "$HERE/vendor" "$HERE/requirements.txt" "$PREFIX.new/"
   find "$PREFIX.new" -name '__pycache__' -prune -exec rm -rf {} +
-  if [[ -x "$PREFIX/venv/bin/python" ]]; then
-    mv "$PREFIX/venv" "$PREFIX.new/venv"          # reuse; pip below still upgrades anything outdated
-  else
-    "$py" -m venv "$PREFIX.new/venv"
+  if ! make_runtime "$py" "$PREFIX.new/runtime"; then
+    warn "$py is not a python.org framework build: using a venv. Its base runtime stays admin-writable (see README)."
+    "$py" -m venv "$PREFIX.new/runtime"
   fi
-  "$PREFIX.new/venv/bin/python" -m pip install -q --no-cache-dir --disable-pip-version-check --upgrade --only-binary=:all: pip -r "$HERE/requirements.txt"
+  "$PREFIX.new/runtime/bin/python3" -I -m pip install -q --no-cache-dir --disable-pip-version-check --upgrade \
+      --only-binary=:all: pip -r "$HERE/requirements.txt"
   command -v cc >/dev/null || die "a C compiler is required (xcode-select --install)"
   local build; build="$(mktemp -d)"; cp "$HERE/pam/"*.c "$HERE/pam/Makefile" "$build/"
   make -s -C "$build" >/dev/null || die "building the PAM module failed"
@@ -131,7 +165,7 @@ cmd_install() {
 
   cat > "$BIN" <<EOF
 #!/bin/sh
-exec "$PREFIX/venv/bin/python" -I "$PREFIX/yogafp/cli.py" "\$@"
+exec "$PREFIX/runtime/bin/python3" -I "$PREFIX/yogafp/cli.py" "\$@"
 EOF
   chmod 755 "$BIN"; chown root:wheel "$BIN"
 
@@ -243,12 +277,12 @@ cmd_uninstall() {
 
 cmd_update() {   # upgrade Python dependencies to the newest stable releases in range, then restart
   need_root
-  [[ -x "$PREFIX/venv/bin/python" ]] || die "yoga-fp is not installed"
+  [[ -x "$PREFIX/runtime/bin/python3" ]] || die "yoga-fp is not installed"
   say "Upgrading dependencies"
-  "$PREFIX/venv/bin/python" -m pip install -q --no-cache-dir --disable-pip-version-check --upgrade \
+  "$PREFIX/runtime/bin/python3" -I -m pip install -q --no-cache-dir --disable-pip-version-check --upgrade \
       --only-binary=:all: pip -r "$PREFIX/requirements.txt"
   chown -R root:wheel "$PREFIX"; chmod -R go-w "$PREFIX"
-  "$PREFIX/venv/bin/python" -m pip list --format=freeze 2>/dev/null | grep -iE '^(numpy|opencv|cryptography|pyusb|libusb)'
+  "$PREFIX/runtime/bin/python3" -I -m pip list --format=freeze 2>/dev/null | grep -iE '^(numpy|opencv|cryptography|pyusb|libusb)'
   launchctl kickstart -k system/$LABEL
   wait_socket && say "updated and restarted" || die "daemon did not restart; see /var/log/yogafpd.log"
 }

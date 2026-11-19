@@ -6,7 +6,7 @@
     <string>@LABEL@</string>
     <key>ProgramArguments</key>
     <array>
-        <string>@PREFIX@/venv/bin/python</string>
+        <string>@PREFIX@/runtime/bin/python3</string>
         <string>-I</string>
         <string>@PREFIX@/yogafp/daemon.py</string>
     </array>

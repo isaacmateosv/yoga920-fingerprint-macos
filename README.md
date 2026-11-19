@@ -112,9 +112,10 @@ Tuning: `sudo yogafp set-threshold N` (default 10). Other commands: `sudo ./inst
 
 * **No Secure Enclave.** Unlike Touch ID, the templates and key are protected by root permissions, the System
   keychain and FileVault — not by dedicated hardware. Use FileVault.
-* **The Python runtime is admin-writable** (python.org/Homebrew installs are group `admin`-writable). Code
-  running as an admin user could alter it and so influence a root process. This is comparable to the existing
-  macOS risk of malware wrapping `sudo` in your shell profile, but it is a real limitation.
+* **Private Python runtime.** python.org installs are admin-group writable, so the installer builds a private,
+  root-owned copy (trimmed, library links rewritten to relative paths, re-signed) in `/usr/local/libexec/yoga-fp/
+  runtime` and runs the daemon on it; nothing is loaded from the original install. Non-framework Pythons (e.g.
+  Homebrew) fall back to a venv, whose base runtime stays admin-writable (the installer warns).
 * **Small sensor.** 112×112 px partial prints; accuracy depends on good enrollment coverage. Measure with
   `yogafp test` before relying on it. The threshold favours rejecting over accepting.
 * **Lock screen / login are not supported.** macOS offers no supported way for third-party readers there.
