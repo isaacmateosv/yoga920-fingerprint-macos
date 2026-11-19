@@ -329,10 +329,14 @@ static void invoke_grant(Mech *m) {
     } else {
         logline(@"grant: %@ is not an administrator (method %@) -> rejected", user ?: @"(none)", method ?: @"(none)");
     }
-    ctx_set(m, CTX_PASS, @"", 0);                     // never keep the password in the context
+    NSString *pwOK = (ok && [method isEqualToString:@"password"]) ? ctx_string(m, CTX_PASS) : nil;
+    ctx_set(m, CTX_PASS, @"", 0);                     // our private copy is always cleared
     ctx_set(m, CTX_NONCE, @"", 0);
     ctx_set(m, CTX_FAILED, ok ? @"0" : @"1", 0);
     if (ok) set_identity(m, user, p);
+    // Password approvals behave like Apple's dialog: the requesting app may extract the password it was given.
+    // Fingerprint approvals carry none, which is why password-consuming panes are excluded from enable-admin.
+    if (pwOK.length) ctx_set(m, kAuthorizationEnvironmentPassword, pwOK, kAuthorizationContextFlagExtractable);
     m->plugin->cb->SetResult(m->engine, ok ? kAuthorizationResultAllow : kAuthorizationResultDeny);
 }
 

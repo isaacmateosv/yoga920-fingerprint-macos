@@ -84,6 +84,10 @@ Tuning: `sudo yogafp set-threshold N` (default 10). Other commands: `sudo ./inst
   on the root step's own log line); `enable-admin` backs up the original definitions, self-checks and rolls back
   automatically; `sudo ./install.sh disable-admin` restores the originals. `sudo` never depends on the plugin.
 * Logs without secrets: `/var/log/yogafp-auth.log` (root step), `~/Library/Logs/yogafp-auth.log` (dialog).
+* **Password-only panes:** Users & Groups and Privacy & Security extract the administrator's *password* from the
+  approval (e.g. to create accounts or manage FileVault). A fingerprint approval carries no password, so these keep
+  the standard macOS dialog (`NEEDS_PASSWORD_RIGHTS` in `install.sh`). Storing your password to hand out on a match
+  would work around it, but is deliberately not done.
 * **Not possible:** the Passwords app, Keychain prompts, Apple Pay and the App Store use LocalAuthentication, which
   only accepts Apple's Touch ID hardware.
 

@@ -29,10 +29,14 @@ APP=/Applications/YogaFP.app
 AUTHPLUGIN=/Library/Security/SecurityAgentPlugins/YogaFPAuth.bundle
 AUTHDB_BACKUP="$DATA/authdb-backup"
 # Admin prompts handled by the plugin. System Settings uses one right per pane, not just system.preferences.
+# Excluded on purpose: panes that extract the administrator's PASSWORD from the authorization afterwards
+# (Users & Groups creates/edits accounts with it; Privacy & Security for FileVault etc.). A fingerprint approval
+# carries no password, so those panes must keep the standard password dialog.
 ADMIN_RIGHTS=(system.privilege.admin system.install.software system.preferences
-              system.preferences.accounts system.preferences.security system.preferences.network
-              system.preferences.sharing system.preferences.datetime system.preferences.energysaver
-              system.preferences.printing system.preferences.startupdisk system.preferences.timemachine)
+              system.preferences.network system.preferences.sharing system.preferences.datetime
+              system.preferences.energysaver system.preferences.printing system.preferences.startupdisk
+              system.preferences.timemachine)
+NEEDS_PASSWORD_RIGHTS=(system.preferences.accounts system.preferences.security)
 TEST_RIGHT=com.yogafp.test
 CHECK_SVC=/etc/pam.d/yogafp-check
 PAM_LINE="auth       sufficient     $PAMMOD"
@@ -352,6 +356,11 @@ cmd_enable_admin() {
       security authorizationdb read "$r" > "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || die "could not back up $r"
     fi
   done
+  local x
+  for x in "${NEEDS_PASSWORD_RIGHTS[@]}"; do                # undo an older version that switched these
+    [[ -f "$AUTHDB_BACKUP/$x.plist" ]] && security authorizationdb write "$x" < "$AUTHDB_BACKUP/$x.plist" >/dev/null 2>&1 \
+      && say "restored $x (needs the password, keeps the standard dialog)"
+  done
   local eligible=()
   for r in "${ADMIN_RIGHTS[@]}"; do                         # only plain "authenticate an admin" rules
     local cls grp
@@ -383,7 +392,7 @@ cmd_enable_admin() {
 cmd_disable_admin() {
   need_root
   local r n=0
-  for r in "${ADMIN_RIGHTS[@]}"; do
+  for r in "${ADMIN_RIGHTS[@]}" "${NEEDS_PASSWORD_RIGHTS[@]}"; do
     if [[ -f "$AUTHDB_BACKUP/$r.plist" ]]; then
       security authorizationdb write "$r" < "$AUTHDB_BACKUP/$r.plist" >/dev/null 2>&1 && n=$((n+1)) || warn "could not restore $r"
     fi
