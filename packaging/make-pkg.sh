@@ -124,7 +124,8 @@ read -r -p "Done. Press Return to close."
 EOF
 chmod 755 "$DMGSRC/Uninstall YogaFP.command"
 cp "$ROOT/README.md" "$DMGSRC/README.md"; cp "$ROOT/LICENSE" "$DMGSRC/LICENSE.txt"
-hdiutil create -quiet -volname "YogaFP $VERSION" -srcfolder "$DMGSRC" -ov -format UDZO "$DIST/$NAME.dmg"
+MB=$(( $(du -sm "$DMGSRC" | cut -f1) * 12 / 10 + 20 ))      # explicit size: hdiutil's estimate can be too small
+hdiutil create -quiet -volname "YogaFP $VERSION" -srcfolder "$DMGSRC" -size "${MB}m" -ov -format UDZO "$DIST/$NAME.dmg"
 
 say "Done:"
 ls -lh "$DIST/$NAME.pkg" "$DIST/$NAME.dmg" | awk '{print "    " $5 "  " $NF}'
