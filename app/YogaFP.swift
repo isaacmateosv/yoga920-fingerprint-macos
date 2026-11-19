@@ -83,6 +83,8 @@ final class Model: ObservableObject {
     @Published var online = false
     @Published var sensorReady = false
     @Published var enrolled = false
+    @Published var fingers: [String] = []
+    @Published var passwordNeeded: String? = nil
     @Published var sudoEnabled = false
 
     @Published var title = ""
@@ -114,7 +116,8 @@ final class Model: ObservableObject {
     var statusLine: String {
         if !online { return "Service not running" }
         if !sensorReady { return "Sensor not ready" }
-        return enrolled ? "Ready" : "No fingerprint enrolled"
+        if !enrolled { return "No fingerprint enrolled" }
+        return passwordNeeded == nil ? "Ready" : "Ready - type your password once"
     }
 
     var symbol: String {
@@ -134,6 +137,8 @@ final class Model: ObservableObject {
             self.online = r["offline"] as? Bool != true && r["ok"] as? Bool == true
             self.sensorReady = r["sensor_ready"] as? Bool ?? false
             self.enrolled = r["enrolled"] as? Bool ?? false
+            self.fingers = r["fingers"] as? [String] ?? []
+            self.passwordNeeded = r["password_needed"] as? String
         }
     }
 
@@ -241,6 +246,44 @@ final class Model: ObservableObject {
         let c = DaemonCall(); call = c
         c.start(["op": "add", "count": 5], onEvent: handle) { [weak self] r in
             self?.finish(r, success: "Added")
+        }
+    }
+
+    /// Enroll another named finger (max 3). The daemon first asks for an already-enrolled finger.
+    func addFinger() {
+        let a = NSAlert()
+        a.messageText = "Add a finger"
+        a.informativeText = "Give it a name, e.g. \"Left index\". You will confirm with an enrolled finger first, then touch the new finger about 30 times across its surface."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.placeholderString = "Finger name"
+        a.accessoryView = field
+        a.addButton(withTitle: "Continue"); a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = field
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        TaskWindow.show(self)
+        begin("Add a finger: \(name)")
+        message = "Confirm with an enrolled finger first"
+        let c = DaemonCall(); call = c
+        c.start(["op": "add_finger", "finger": name], onEvent: handle) { [weak self] r in
+            self?.finish(r, success: "\(name) added")
+        }
+    }
+
+    func removeFinger(_ name: String) {
+        let a = NSAlert()
+        a.messageText = "Remove \"\(name)\"?"
+        a.informativeText = "You will confirm with an enrolled finger. The other fingers stay enrolled."
+        a.addButton(withTitle: "Remove"); a.addButton(withTitle: "Cancel")
+        a.alertStyle = .warning
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        TaskWindow.show(self)
+        begin("Remove a finger")
+        message = "Confirm with an enrolled finger"
+        let c = DaemonCall(); call = c
+        c.start(["op": "remove_finger", "finger": name], onEvent: handle) { [weak self] r in
+            self?.finish(r, success: "\(name) removed")
         }
     }
 
@@ -423,6 +466,15 @@ struct MenuContent: View {
         Button("Test fingerprint…") { TaskWindow.show(m); m.verify() }.disabled(!m.enrolled || !m.online)
         Button(m.enrolled ? "Re-enroll…" : "Enroll fingerprint…") { TaskWindow.show(m); m.enroll() }.disabled(!m.online)
         Button("Add touches for a missed area…") { TaskWindow.show(m); m.addTouches() }.disabled(!m.enrolled || !m.online)
+        Divider()
+        Text("Fingers: \(m.fingers.isEmpty ? "none" : m.fingers.joined(separator: ", ")) (\(m.fingers.count)/3)")
+        Button("Add a finger…") { m.addFinger() }.disabled(!m.enrolled || !m.online || m.fingers.count >= 3)
+        Menu("Remove a finger") {
+            ForEach(m.fingers, id: \.self) { name in
+                Button(name) { m.removeFinger(name) }
+            }
+        }.disabled(m.fingers.count < 2 || !m.online)
+        Divider()
         Button("Delete fingerprint data…") { TaskWindow.show(m); m.deleteData() }.disabled(!m.enrolled || !m.online)
         Divider()
         Button("How to turn sudo on or off…") {

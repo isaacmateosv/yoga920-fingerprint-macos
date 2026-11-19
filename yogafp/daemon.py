@@ -193,14 +193,18 @@ class Daemon:
     def adapt(self, uid, ft, score_):
         """Add a certain match that covers new area to the template (encrypted), within the caps."""
         try:
-            samples, ne = self.store.load_full(uid)
+            samples, labels, guided = self.store.load_meta(uid)
             if score_ >= core.ADAPT_NOVEL_MAX * len(ft[0]):
                 return                                    # mostly a repeat of something already enrolled
-            learned = samples[ne:] + [ft]
-            if len(learned) > core.ADAPT_MAX_LEARNED:
-                learned = learned[-core.ADAPT_MAX_LEARNED:]
-            self.store.save(uid, samples[:ne] + learned, n_enrolled=ne)
-            log.info('template learned a new area uid=%d (guided %d + learned %d)', uid, ne, len(learned))
+            finger = labels[max(range(len(samples)), key=lambda i: core.inliers(ft, samples[i]))]
+            samples, labels, guided = samples + [ft], labels + [finger], guided + [False]
+            learned = [i for i in range(len(samples)) if labels[i] == finger and not guided[i]]
+            for i in reversed(learned[:-core.ADAPT_MAX_LEARNED] if len(learned) > core.ADAPT_MAX_LEARNED else []):
+                del samples[i], labels[i], guided[i]      # oldest learned of this finger go first
+            self.store.save(uid, samples, labels=labels, guided=guided)
+            log.info('template learned a new area uid=%d finger=%r (guided %d + learned %d)', uid, finger,
+                     sum(1 for i in range(len(samples)) if labels[i] == finger and guided[i]),
+                     sum(1 for i in range(len(samples)) if labels[i] == finger and not guided[i]))
         except Exception as e:
             log.warning('template adaptation skipped: %s', e)
 
@@ -248,6 +252,7 @@ class Daemon:
             s = self.sensor
             return {'version': VERSION, 'uid': uid, 'enrolled': self.store.enrolled(uid), 'threshold': self.threshold(),
                     'method': self.method(), 'password_needed': self.policy_block(uid),
+                    'fingers': self.store.fingers(uid),
                     'sensor_present': (s.present() if s else None), 'sensor_ready': bool(s and s.ready),
                     'grant': self.grants.get(uid, 0) > time.time()}
 
@@ -318,8 +323,26 @@ class Daemon:
             self.grants[uid] = time.time() + GRANT_SECONDS
             return {'granted_until': self.grants[uid]}
 
-        if op not in ('verify', 'enroll', 'add', 'delete', 'setup', 'test'):
+        if op not in ('verify', 'enroll', 'add', 'delete', 'setup', 'test', 'add_finger', 'remove_finger'):
             raise core.FPError('unknown op')
+
+        finger = req.get('finger')
+        if finger is not None:
+            finger = str(finger).strip()
+            if not (1 <= len(finger) <= 32) or not finger.isprintable():
+                raise core.FPError('finger name must be 1-32 printable characters')
+        if op == 'add_finger':
+            have = self.store.fingers(uid)
+            if not finger:
+                raise core.FPError('give the new finger a name, e.g. "Left index"')
+            if finger in have:
+                raise core.FPError('a finger named %r is already enrolled' % finger)
+            if len(have) >= core.MAX_FINGERS:
+                raise core.FPError('at most %d fingers per account' % core.MAX_FINGERS)
+            if not have:
+                op = 'enroll'                              # first finger: same as a normal enrollment
+        if op == 'remove_finger' and finger not in self.store.fingers(uid):
+            raise core.FPError('no finger named %r' % finger)
 
         if not self.lock.acquire(blocking=False):
             raise core.FPError('busy: another fingerprint operation is in progress')
@@ -410,21 +433,41 @@ class Daemon:
                 self.store.delete(uid)
                 return {'deleted': True}
 
-            cap.take_blank(trusted=(op == 'enroll'))
-            base = self.store.load(uid) if op == 'add' else []
-            if op == 'add':
+            if op == 'remove_finger':
+                samples, labels, guided = self.store.load_meta(uid)
+                keep = [i for i in range(len(samples)) if labels[i] != finger]
+                if not keep:
+                    self.store.delete(uid)
+                else:
+                    self.store.save(uid, [samples[i] for i in keep], labels=[labels[i] for i in keep],
+                                    guided=[guided[i] for i in keep])
+                log.info('finger %r removed for uid=%d', finger, uid)
+                return {'removed': finger, 'fingers': self.store.fingers(uid)}
+
+            cap.take_blank(trusted=(op in ('enroll', 'add_finger')))
+            if op == 'add':                                # extra touches for an area that is often missed
+                samples, labels, guided = self.store.load_meta(uid)
+                target = finger or labels[0]
+                if target not in labels:
+                    raise core.FPError('no finger named %r' % target)
                 regions = [('extra', req.get('label', 'Touch the area that is often not recognized'),
                             int(req.get('count', 5)))]
-            else:
-                regions = core.REGIONS
-            samples = cap.enroll(base, regions)
-            if op == 'add':
-                _, ne = self.store.load_full(uid)
-                guided = base[:ne] + samples[len(base):]          # 'add' touches count as guided
-                self.store.save(uid, guided + base[ne:], n_enrolled=len(guided))
-            else:
-                self.store.save(uid, samples)                     # fresh enrollment: all guided, nothing learned
-            return {'samples': len(samples)}
+                new = cap.enroll([], regions)
+                self.store.save(uid, samples + new, labels=labels + [target] * len(new),
+                                guided=guided + [True] * len(new))
+                return {'samples': len(samples) + len(new), 'finger': target}
+            if op == 'add_finger':
+                samples, labels, guided = self.store.load_meta(uid)
+                new = cap.enroll([], core.REGIONS)
+                self.store.save(uid, samples + new, labels=labels + [finger] * len(new),
+                                guided=guided + [True] * len(new))
+                log.info('finger %r added for uid=%d (%d touches)', finger, uid, len(new))
+                return {'samples': len(new), 'finger': finger, 'fingers': self.store.fingers(uid)}
+            # enroll: fresh enrollment of one finger, replacing everything
+            new = cap.enroll([], core.REGIONS)
+            name = finger or core.DEFAULT_FINGER
+            self.store.save(uid, new, labels=[name] * len(new), guided=[True] * len(new))
+            return {'samples': len(new), 'finger': name, 'fingers': [name]}
         finally:
             self.lock.release()
 

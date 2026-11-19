@@ -55,7 +55,7 @@ class FakeSensor:
         pat, dx, dy, ang = self.queue.pop(0)
         M = cv2.getRotationMatrix2D((200, 200), ang, 1.0); M[:, 2] += [dx, dy]
         self.cur = cv2.warpAffine(pat.astype(np.float32), M, (400, 400))[144:256, 144:256]
-        self.frames_left = 8; self.gap = 3
+        self.frames_left = 8; self.gap = 6       # a person lifts for a moment between touches
         return self.base + self.cur + noise
 
 
@@ -67,6 +67,7 @@ def other_texture(seed, N=400):
 
 
 A, B = pattern(7), other_texture(99)
+C = pattern(23)              # a second finger of the same user (coverage >= 0.69, unlike A)
 ENROLL_POSES = [(0, 0, 0), (15, 0, 5), (-15, 5, -5), (0, 15, 8), (5, -15, -8), (20, 20, 0),
                 (-20, -10, 3), (10, -5, -3), (8, 8, 2), (-8, 8, -2)]
 SMALL_REGIONS = [('center', 'c', 5), ('upper_right', 'ur', 5)]
@@ -279,6 +280,55 @@ def run():
     call({'op': 'password_ok', 'uid': me}, 0)
     check('password clears the requirement', me not in d.password_required)
     fs.queue.clear(); d.locked_until.clear(); d.fails.clear()
+
+    # multiple fingers per account (named, max 3)
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; d.locked_until.clear(); d.fails.clear(); d.password_required.clear()
+    st = call({'op': 'status'}, me)
+    check('existing enrollment is listed as one finger (%s)' % st.get('fingers'), st['fingers'] == [core.DEFAULT_FINGER])
+    r = call({'op': 'add_finger'}, me)
+    check('add_finger needs a name', not r['ok'])
+    r = call({'op': 'add_finger', 'finger': core.DEFAULT_FINGER}, me)
+    check('duplicate finger name refused', not r['ok'] and 'already' in r['error'])
+    fs.touch(B, 0, 0, 0); fs.touch(B, 3, 3, 0); fs.touch(B, -3, 2, 0)
+    r = call({'op': 'add_finger', 'finger': 'Left index'}, me)
+    check('adding a finger without a confirming enrolled finger is refused', not r['ok'])
+    d.locked_until.clear(); d.fails.clear(); d.password_required.clear()
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0
+    fs.touch(A, 6, -2, 2)                                          # confirm with Finger 1 ...
+    for p in ENROLL_POSES * 3: fs.touch(C, *p)                     # ... then enroll the new finger (spares)
+    r = call({'op': 'add_finger', 'finger': 'Left index'}, me)
+    check('second finger enrolled after confirmation (%s)' % (r.get('fingers') or r.get('error')),
+          r['ok'] and r['fingers'] == [core.DEFAULT_FINGER, 'Left index'])
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0
+    fs.touch(C, 7, 3, 2)
+    r = call({'op': 'verify'}, me)
+    check('the second finger is recognized', r['ok'] and r['match'])
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0
+    fs.touch(A, 6, -2, 2)
+    r = call({'op': 'verify'}, me)
+    check('the first finger still works', r['ok'] and r['match'])
+    saved_max = core.MAX_FINGERS; core.MAX_FINGERS = 2
+    r = call({'op': 'add_finger', 'finger': 'Thumb'}, me)
+    check('finger limit enforced', not r['ok'] and 'at most' in r['error'])
+    core.MAX_FINGERS = saved_max
+    # adaptive learning credits the finger that matched
+    sa = (core.ADAPT_FACTOR, core.ADAPT_NOVEL_MAX); core.ADAPT_FACTOR, core.ADAPT_NOVEL_MAX = 1.0, 10.0
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; fs.touch(C, -6, 4, 3)
+    call({'op': 'verify'}, me)
+    _, labs, gd = store.load_meta(me)
+    check('learned area attributed to the matching finger', labs[-1] == 'Left index' and gd[-1] is False)
+    core.ADAPT_FACTOR, core.ADAPT_NOVEL_MAX = sa
+    # remove a finger (needs a confirming finger)
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; fs.touch(A, 6, -2, 2)
+    r = call({'op': 'remove_finger', 'finger': 'Left index'}, me)
+    check('remove_finger removes only that finger (%s)' % r.get('fingers'), r['ok'] and r['fingers'] == [core.DEFAULT_FINGER])
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0
+    for _ in range(3): fs.touch(C, 7, 3, 2)
+    r = call({'op': 'verify', 'tries': 3, 'timeout': 3}, me)
+    check('the removed finger no longer matches', r['ok'] and not r['match'])
+    d.locked_until.clear(); d.fails.clear(); d.password_required.clear(); fs.queue.clear()
+    r = call({'op': 'remove_finger', 'finger': 'Nope'}, me)
+    check('removing an unknown finger is refused', not r['ok'])
 
     # cross-uid template swap must fail authentication
     other = me + 1

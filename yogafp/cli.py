@@ -3,7 +3,10 @@
   yogafp status
   yogafp verify
   yogafp enroll                 first time: run `sudo yogafp grant-enroll` first (or run enroll with sudo)
-  yogafp add [count]            add touches for an area that is often not recognized
+  yogafp add [count]            add touches for an area that is often not recognized (--finger NAME)
+  yogafp fingers                list your enrolled fingers
+  yogafp add-finger NAME        enroll another finger, e.g. "Left index" (max 3; confirm with an enrolled one)
+  yogafp remove-finger NAME     remove one finger (confirm with an enrolled finger)
   yogafp test [tries]           print match scores (threshold tuning)
   yogafp delete                 delete your fingerprint data (confirms with your finger first)
   sudo yogafp grant-enroll [--uid N]   allow the invoking user (or uid N) to enroll for 5 minutes
@@ -68,8 +71,19 @@ def main(argv=None):
     uid_opt = None
     if '--uid' in a:                       # root only: e.g. the menu bar app's admin-prompted grant
         i = a.index('--uid'); uid_opt = int(a[i + 1]); del a[i:i + 2]
+    finger = None
+    if '--finger' in a:
+        i = a.index('--finger'); finger = a[i + 1]; del a[i:i + 2]
     cmd, rest = a[0], a[1:]
-    req = {'op': cmd.replace('-', '_')}
+    req = {'op': 'status' if cmd == 'fingers' else cmd.replace('-', '_')}
+    if cmd in ('add-finger', 'remove-finger'):
+        if not rest:
+            sys.exit('usage: yogafp %s "Finger name"' % cmd)
+        finger = ' '.join(rest)
+        if cmd == 'remove-finger' and input('Remove the finger %r? [y/N] ' % finger).strip().lower() != 'y':
+            return 1
+    if finger:
+        req['finger'] = finger
     if os.geteuid() == 0:
         req['uid'] = uid_opt if uid_opt is not None else target_uid()
     elif uid_opt is not None and uid_opt != os.getuid():
@@ -99,6 +113,10 @@ def main(argv=None):
         print('error: %s' % res.get('error'), file=sys.stderr)
         return 1
     out = {k: v for k, v in res.items() if k not in ('done', 'ok')}
+    if cmd == 'fingers':
+        names = res.get('fingers') or []
+        print('\n'.join('  %d. %s' % (i + 1, n) for i, n in enumerate(names)) if names else 'no fingers enrolled')
+        return 0
     if cmd == 'verify':
         print('MATCH' if res.get('match') else 'NO MATCH (%s)' % res.get('reason'))
         return 0 if res.get('match') else 2

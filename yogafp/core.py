@@ -43,6 +43,9 @@ ADAPT_FACTOR = 2.0      # only matches scoring >= 2x the threshold teach the tem
 ADAPT_NOVEL_MAX = 0.6   # ...and only if they are not a near-duplicate (best score < 60% of their own keypoints)
 ADAPT_MAX_LEARNED = 40  # cap on learned samples; oldest learned are dropped first, guided ones never
 
+MAX_FINGERS = 3          # per account, like Touch ID (each extra finger slightly raises the false-accept chance)
+DEFAULT_FINGER = 'Finger 1'
+
 AAD = b'yoga-fp-templates-v1'
 KC_SERVICE = 'yoga-fp-template-key'
 SYSTEM_KEYCHAIN = '/Library/Keychains/System.keychain'
@@ -91,10 +94,17 @@ class Store:
     def enrolled(self, uid):
         return os.path.exists(self.path(uid))
 
-    def save(self, uid, samples, n_enrolled=None):
-        """samples[:n_enrolled] come from guided enrollment; the rest were learned from strong matches."""
+    def save(self, uid, samples, n_enrolled=None, labels=None, guided=None):
+        """labels[i] = finger name of sample i; guided[i] = from guided enrollment (else learned from a strong
+        match). Legacy callers pass n_enrolled: samples[:n_enrolled] guided, all one finger."""
+        n = len(samples)
+        ne = n if n_enrolled is None else int(n_enrolled)
+        labels = list(labels) if labels is not None else [DEFAULT_FINGER] * n
+        guided = list(guided) if guided is not None else [i < ne for i in range(n)]
+        assert len(labels) == n and len(guided) == n
         buf = io.BytesIO()
-        arrays = {'n_enrolled': np.array([len(samples) if n_enrolled is None else int(n_enrolled)], np.int32)}
+        arrays = {'n_enrolled': np.array([sum(guided)], np.int32),
+                  'labels': np.array(labels, dtype='<U32'), 'guided': np.array(guided, dtype=bool)}
         for i, (kp, de) in enumerate(samples):
             arrays['kp%d' % i] = kp
             arrays['de%d' % i] = de
@@ -113,10 +123,21 @@ class Store:
         os.replace(tmp, self.path(uid))
 
     def load(self, uid):
-        return self.load_full(uid)[0]
+        return self.load_meta(uid)[0]
 
     def load_full(self, uid):
-        """-> (samples, n_enrolled)"""
+        """-> (samples, number of guided samples)  (kept for older callers)"""
+        samples, labels, guided = self.load_meta(uid)
+        return samples, sum(guided)
+
+    def fingers(self, uid):
+        if not self.enrolled(uid):
+            return []
+        _, labels, _ = self.load_meta(uid)
+        return list(dict.fromkeys(labels))           # enrollment order, unique
+
+    def load_meta(self, uid):
+        """-> (samples, labels, guided)"""
         p = self.path(uid)
         if not os.path.exists(p):
             raise FPError('no fingerprint enrolled for uid %d' % uid)
@@ -127,8 +148,11 @@ class Store:
             raise FPError('template file failed authentication (tampered or wrong key)')
         z = np.load(io.BytesIO(data), allow_pickle=False)
         n = len([k for k in z.files if k.startswith('kp')])
-        ne = int(z['n_enrolled'][0]) if 'n_enrolled' in z.files else n
-        return [(z['kp%d' % i], z['de%d' % i]) for i in range(n)], ne
+        samples = [(z['kp%d' % i], z['de%d' % i]) for i in range(n)]
+        if 'labels' in z.files:
+            return samples, [str(x) for x in z['labels']], [bool(x) for x in z['guided']]
+        ne = int(z['n_enrolled'][0]) if 'n_enrolled' in z.files else n     # older files: one finger
+        return samples, [DEFAULT_FINGER] * n, [i < ne for i in range(n)]
 
     def delete(self, uid):
         if os.path.exists(self.path(uid)):

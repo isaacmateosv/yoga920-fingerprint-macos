@@ -66,6 +66,10 @@ sudo ./install.sh enable-sudo                      # optional: fingerprint for s
 `enable-sudo` first proves the module works in an isolated PAM service with a real touch, then edits only
 `sudo_local` (backup kept), re-checks that sudo's PAM stack loads, and rolls back automatically on failure.
 
+**More fingers:** up to 3 named fingers per account, like Touch ID (each extra finger slightly raises the chance
+of a false accept). Adding or removing one needs a touch from an already-enrolled finger:
+`yogafp add-finger "Left index"`, `yogafp fingers`, `yogafp remove-finger "Left index"`, or the YogaFP menu.
+
 Tuning: `sudo yogafp set-threshold N` (default 10). Other commands: `sudo ./install.sh update`, `yogafp verify`, `yogafp add 5` (more touches for an area that fails), `yogafp delete`,
 `./install.sh status`, `sudo ./install.sh disable-sudo`, `sudo ./install.sh uninstall [--purge]`.
 
