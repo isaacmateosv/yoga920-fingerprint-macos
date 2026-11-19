@@ -1,11 +1,11 @@
 // YogaFPAuth - macOS authorization plugin: fingerprint (yoga-fp) for admin dialogs, password always available.
 //
 // Mechanisms (used together, in this order, by an "evaluate-mechanisms" right):
-//   YogaFP:fingerprint,privileged   runs as root, no UI. Finds the console user, requires admin group membership,
+//   YogaFPAuth:fingerprint,privileged   runs as root, no UI. Finds the console user, requires admin group membership,
 //                                   asks yogafpd (/var/run/yogafpd.sock, peer must be root) to verify a touch.
 //                                   NEVER grants on its own: it only records "yogafp-verified" in the context and
 //                                   always lets evaluation continue (result Allow = "continue").
-//   YogaFP:password                 runs in SecurityAgent (UI). If the fingerprint was verified for an admin, it
+//   YogaFPAuth:password                 runs in SecurityAgent (UI). If the fingerprint was verified for an admin, it
 //                                   allows immediately. Otherwise it shows a password dialog, verifies the password
 //                                   with OpenDirectory and checks admin membership.
 // Fail-safe: any error in the fingerprint step falls through to the password dialog.

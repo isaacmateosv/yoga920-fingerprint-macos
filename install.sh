@@ -249,8 +249,8 @@ right_def() {   # $1 = shared (true/false), $2 = timeout seconds -> evaluate-mec
   <key>class</key><string>evaluate-mechanisms</string>
   <key>comment</key><string>yoga-fp: fingerprint, then password. Restore with: sudo ./install.sh disable-admin</string>
   <key>mechanisms</key><array>
-    <string>YogaFP:fingerprint,privileged</string>
-    <string>YogaFP:password</string>
+    <string>YogaFPAuth:fingerprint,privileged</string>
+    <string>YogaFPAuth:password</string>
   </array>
   <key>shared</key><$1/>
   <key>timeout</key><integer>$2</integer>
@@ -282,9 +282,9 @@ cmd_admin_test() {
   say "Installing the authorization plugin: $AUTHPLUGIN"
   install_authplugin
   right_def false 0 | security authorizationdb write "$TEST_RIGHT" >/dev/null 2>&1 || die "could not create the test right"
-  local def; def="$(security authorizationdb read "$TEST_RIGHT" 2>/dev/null | grep -c 'YogaFP:' || true)"
-  [[ "$def" == 2 ]] || { security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1; die "test right was not stored as expected (found $def YogaFP mechanisms)"; }
-  say "Test right $TEST_RIGHT created and verified (2 YogaFP mechanisms)."
+  local def; def="$(security authorizationdb read "$TEST_RIGHT" 2>/dev/null | grep -c 'YogaFPAuth:' || true)"
+  [[ "$def" == 2 ]] || { security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1; die "test right was not stored as expected (found $def YogaFPAuth mechanisms)"; }
+  say "Test right $TEST_RIGHT created and verified (2 YogaFPAuth mechanisms)."
 
   local t1 r1 l1 t2 r2 l2
   t1="$(date '+%Y-%m-%d %H:%M:%S')"
