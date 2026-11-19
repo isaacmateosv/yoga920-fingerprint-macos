@@ -195,10 +195,38 @@ final class Model: ObservableObject {
         }
     }
 
-    func enableSudo() {
-        setupLog = "Touch the sensor when the YogaFP panel asks (twice): once to test the module, once to confirm sudo still loads.\n"
-        runAdmin(["enable-sudo"], title: "Turning on fingerprint for sudo")
+    /// sudo's configuration lives in /etc/pam.d, which macOS only lets a process change when the app responsible
+    /// for it holds the "administer the system" privacy permission. Terminal has it; YogaFP deliberately does not.
+    /// So the sudo step runs in Terminal, from a one-line .command file (no Automation permission needed).
+    func sudoInTerminal(_ action: String) {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("YogaFP")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let f = dir.appendingPathComponent("\(action).command")
+        let script = """
+        #!/bin/bash
+        clear
+        echo "YogaFP: \(action == "enable-sudo" ? "turn on fingerprint for sudo" : "turn off fingerprint for sudo")"
+        echo "Type your password below. \(action == "enable-sudo" ? "Then touch the sensor twice when asked." : "")"
+        echo
+        sudo /usr/local/libexec/yoga-fp/yogafp-admin.sh \(action)
+        echo
+        echo "You can close this window and return to YogaFP Setup."
+        rm -f "$0"
+
+        """
+        do {
+            try script.write(to: f, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: f.path)
+            NSWorkspace.shared.open([f], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"),
+                                    configuration: NSWorkspace.OpenConfiguration())
+            setupLog = "Opened Terminal: type your password there\(action == "enable-sudo" ? ", then touch the sensor twice" : "").\nThis window updates by itself when it is done.\n"
+            for delay in [10.0, 25.0, 45.0, 70.0, 100.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refresh() }
+            }
+        } catch { setupLog = "Could not open Terminal: \(error.localizedDescription)\n" }
     }
+
+    func enableSudo() { sudoInTerminal("enable-sudo") }
 
     /// Admin dialogs: the self-check dialogs must appear in the user's desktop session, so the app runs them itself.
     /// Root-only parts (test permission, enabling) go through the admin prompt.
@@ -595,9 +623,9 @@ struct SetupView: View {
                       done: m.enrolled, action: m.enrolled ? "Add finger…" : "Enroll…", enabled: m.online && !m.setupBusy) {
                 if m.enrolled { m.addFinger() } else { TaskWindow.show(m); m.enroll() }
             }
-            SetupStep(n: 3, title: "Use fingerprint for sudo", detail: m.sudoEnabled ? "On. Terminal sudo asks for your finger first." : "Tested in isolation first; rolls back automatically if anything fails.",
+            SetupStep(n: 3, title: "Use fingerprint for sudo", detail: m.sudoEnabled ? "On. Terminal sudo asks for your finger first." : "Opens Terminal (macOS only lets Terminal change sudo's settings). Tested in isolation first; rolls back if anything fails.",
                       done: m.sudoEnabled, action: m.sudoEnabled ? "Turn off" : "Turn on", enabled: m.enrolled && !m.setupBusy) {
-                if m.sudoEnabled { m.setupLog = ""; m.runAdmin(["disable-sudo"], title: "Turning off fingerprint for sudo") } else { m.enableSudo() }
+                if m.sudoEnabled { m.sudoInTerminal("disable-sudo") } else { m.enableSudo() }
             }
             SetupStep(n: 4, title: "Use fingerprint for admin dialogs", detail: m.adminEnabled ? "On for app admin requests, installers and most System Settings panes." : "Runs a private test first (touch, then type your password), then enables with automatic rollback.",
                       done: m.adminEnabled, action: m.adminEnabled ? "Turn off" : "Turn on", enabled: m.enrolled && !m.setupBusy) {
