@@ -28,7 +28,11 @@ SUDO_LOCAL=/etc/pam.d/sudo_local
 APP=/Applications/YogaFP.app
 AUTHPLUGIN=/Library/Security/SecurityAgentPlugins/YogaFPAuth.bundle
 AUTHDB_BACKUP="$DATA/authdb-backup"
-ADMIN_RIGHTS=(system.privilege.admin system.install.software system.preferences)
+# Admin prompts handled by the plugin. System Settings uses one right per pane, not just system.preferences.
+ADMIN_RIGHTS=(system.privilege.admin system.install.software system.preferences
+              system.preferences.accounts system.preferences.security system.preferences.network
+              system.preferences.sharing system.preferences.datetime system.preferences.energysaver
+              system.preferences.printing system.preferences.startupdisk system.preferences.timemachine)
 TEST_RIGHT=com.yogafp.test
 CHECK_SVC=/etc/pam.d/yogafp-check
 PAM_LINE="auth       sufficient     $PAMMOD"
@@ -348,8 +352,15 @@ cmd_enable_admin() {
       security authorizationdb read "$r" > "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || die "could not back up $r"
     fi
   done
+  local eligible=()
+  for r in "${ADMIN_RIGHTS[@]}"; do                         # only plain "authenticate an admin" rules
+    local cls grp
+    cls=$(/usr/libexec/PlistBuddy -c "Print :class" "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || true)
+    grp=$(/usr/libexec/PlistBuddy -c "Print :group" "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || true)
+    if [[ "$cls" == user && "$grp" == admin ]]; then eligible+=("$r"); else warn "skipping $r (class '$cls', group '$grp')"; fi
+  done
   say "Original definitions backed up to $AUTHDB_BACKUP"
-  for r in "${ADMIN_RIGHTS[@]}"; do
+  for r in "${eligible[@]}"; do
     shared=$(/usr/libexec/PlistBuddy -c "Print :shared" "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || true)
     timeout=$(/usr/libexec/PlistBuddy -c "Print :timeout" "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || true)
     [[ "$shared" == true ]] || shared=false
@@ -364,7 +375,8 @@ cmd_enable_admin() {
     cmd_disable_admin
     exit 1
   fi
-  say "Enabled for: ${ADMIN_RIGHTS[*]}. Your password always works in the dialog."
+  say "Enabled for ${#eligible[@]} admin prompts: ${eligible[*]}"
+  say "Your password always works in the dialog."
   say "Undo anytime with: sudo $0 disable-admin   (sudo with your password always works)"
 }
 
