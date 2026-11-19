@@ -314,6 +314,21 @@ cmd_admin_test() {
   fi
 }
 
+cmd_admin_test_define() {   # keep the private test right defined for manual/diagnostic requests
+  need_root
+  install_authplugin
+  right_def false 0 | security authorizationdb write "$TEST_RIGHT" >/dev/null 2>&1 || die "could not create the test right"
+  say "Test right $TEST_RIGHT is defined. Request it as your normal user (no sudo):"
+  echo "      $PREFIX/authtest $TEST_RIGHT"
+  say "Remove it with: sudo $0 admin-test-remove"
+}
+
+cmd_admin_test_remove() {
+  need_root
+  security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1 || true
+  say "test right removed"
+}
+
 cmd_enable_admin() {
   need_root
   [[ -f "$DATA/admin-test-passed" ]] || die "run 'sudo $0 admin-test' first (it must pass)"
@@ -380,6 +395,8 @@ case "$cmd" in
   uninstall) cmd_uninstall "${PURGE:-}" ;;
   update) cmd_update ;;
   admin-test) cmd_admin_test ;;
+  admin-test-define) cmd_admin_test_define ;;
+  admin-test-remove) cmd_admin_test_remove ;;
   enable-admin) cmd_enable_admin ;;
   disable-admin) cmd_disable_admin ;;
   status) cmd_status ;;
