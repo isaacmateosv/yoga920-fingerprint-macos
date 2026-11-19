@@ -47,6 +47,51 @@ with `devtools/collect.py`, scored with `devtools/evaluate.py`, deleted afterwar
 Across 120 other-finger touches the highest score was 9. The remaining ~13% of own-finger touches overlap almost
 nothing that was enrolled (sensor area limit); adaptive learning fills those areas in with use.
 
+## How we got here
+
+The sensor had no macOS driver and no Linux support for this exact model, so this was built step by step,
+mostly read-only investigation before anything was written to the sensor.
+
+1. **Identify the hardware.** USB `06cb:0081`; the sensor reports ROM **6.7 build 164** and identifies as
+   `57K0 FM-3297-004` (sensor type `0xb5`). The closest supported relative in
+   [python-validity](https://github.com/uunicorn/python-validity) is `138a:0090` (ThinkPad), with the same ROM.
+2. **Study the Windows driver** (copied from the laptop's own Windows partition, plus two Microsoft Update Catalog
+   releases, 5.5.2740 and 5.5.2811). The TLS pairing with the sensor (`DoPairing`, ECDH/ECDSA) runs in ordinary
+   driver code. The sensor command programs live in an Intel SGX enclave image, `synaTEE.signed.dll`, which at
+   first looked encrypted. It is not: two of its programs are **byte-identical** to python-validity's published
+   `0090` blobs, so the high-entropy data is compressed sensor programs stored in the clear.
+3. **Get the firmware extension.** `6_07f_Lenovo.xpfwext` (6.07.0164, product 0x30) from Lenovo's official
+   driver `n1cgn08w.exe` (SHA-512 verified, extracted with innoextract). It is the same file the 0090 uses.
+4. **Fix the partition table.** Formatting failed with `0x04af` and an 11-entry table: ROM 6.7 b164 predates
+   signed partition tables (CVE-2019-18618) and stores the signature as extra partitions. python-validity
+   **PR #294** (unmerged) describes exactly this ROM; using the 0090 layout *without* a signature, plus not
+   re-selecting an already active USB configuration, fixed pairing.
+5. **Pick the right command blobs.** Candidates taken from the newer 5.5.2811 driver rebooted or crashed the
+   sensor (wrong ROM/firmware generation). Upstream's tested 0090 blob set works unchanged, because the ROM and
+   firmware are identical. **Nothing from the Windows driver ships in this project.**
+6. **Calibrate.** Iterative per-pixel calibration crashes the 2016 firmware; like the 0090's sensor (type
+   `0xdb`), type `0xb5` uses a single blank reference frame.
+7. **Pair to this Mac.** The TLS pairing key is derived from the Mac's model and serial (read via `ioreg`),
+   so the sensor stays paired to this machine across reinstalls.
+8. **Match on the Mac.** On-chip enrollment is not supported by this firmware (`0x69` → `0x0401`), but raw
+   112×112 frames can be streamed. Matching is done on the host: SIFT keypoints + RANSAC-consistent inliers,
+   chosen over Gabor-enhanced SIFT, band-limited phase-only correlation and fusions on a labeled, encrypted,
+   local dataset (see *Matcher evaluation*). Then: a steadier capture (finger must settle), adaptive enrollment,
+   Touch ID-style password rules and up to 3 fingers.
+9. **Make it a product.** Root daemon with kernel-verified callers, PAM module for `sudo`, authorization plugin
+   for admin dialogs (root step verifies a one-time match proof), menu bar app, installer with automatic
+   rollback, private root-owned Python runtime, and CI.
+
+### What was (not) used
+
+* **No SGX bypass, decryption or enclave attack** was done or needed. Step 2 showed the relevant data is not
+  protected by the enclave, and the final project does not use the enclave image at all.
+* **[rea](https://github.com/morluto/rea)** (Reverse Engineer Anything) was available, and its documentation was
+  read, but it was **not used**: the analysis was done with `llvm-objdump`, small Python scripts (PE section
+  mapper, blob catalog parser, entropy measurement) and python-validity's own code.
+* Development was done with the help of [Claude Code](https://claude.com/claude-code) (Anthropic). Biometric
+  data was never sent to it: images stayed in memory or encrypted on the Mac, and quality checks were numbers only.
+
 ## Requirements
 
 * Lenovo Yoga 920 (or another machine with a 06cb:0081, ROM 6.7 build 164 — the installer checks the USB ID)
