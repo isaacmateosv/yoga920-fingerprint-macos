@@ -79,6 +79,8 @@ static int is_remote(pam_handle_t *pamh) {
     return e && *e;
 }
 
+static void free_uid(pam_handle_t *pamh, void *data, int status) { (void)pamh; (void)status; free(data); }
+
 /* Tell yogafpd (peer must be root) that uid just authenticated with a password: Touch ID-style policy
    (fingerprint requires a password within 48 h / after 5 failures). Best effort, never blocks auth. */
 static void report_password(uid_t uid) {
@@ -103,15 +105,18 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     int tries = opt_int(argc, argv, "tries", 3, 1, 5);
     int tmo = opt_int(argc, argv, "timeout", 10, 2, 30);
 
-    if (is_remote(pamh)) {
-        if (debug) syslog(LOG_AUTH | LOG_DEBUG, "pam_yogafp: remote session, skipping");
-        return PAM_IGNORE;
-    }
-
     const char *user = NULL;
     if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS || !user) return PAM_IGNORE;
     struct passwd *pw = getpwnam(user);
     if (!pw) return PAM_IGNORE;
+    /* Remember who is authenticating NOW: sudo switches PAM_USER to the target user before setcred. */
+    uid_t *seen = malloc(sizeof *seen);
+    if (seen) { *seen = pw->pw_uid; pam_set_data(pamh, "yogafp_auth_uid", seen, free_uid); }
+
+    if (is_remote(pamh)) {
+        if (debug) syslog(LOG_AUTH | LOG_DEBUG, "pam_yogafp: remote session, skipping");
+        return PAM_IGNORE;
+    }
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return PAM_IGNORE;
@@ -193,13 +198,13 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char **argv) {
     (void)argc; (void)argv;
     if (flags & (PAM_ESTABLISH_CRED | PAM_REINITIALIZE_CRED)) {
-        const void *fp = NULL;
-        if (pam_get_data(pamh, "yogafp_fingerprint", &fp) != PAM_SUCCESS || !fp) {
-            const char *user = NULL;
-            struct passwd *pw;
-            if (pam_get_user(pamh, &user, NULL) == PAM_SUCCESS && user && (pw = getpwnam(user)))
-                report_password(pw->pw_uid);
-        }
+        /* Report a password only if THIS module saw the authentication (so it really happened: root's
+           `sudo -u` or NOPASSWD rules never call authenticate) and the fingerprint was not what passed.
+           Credit the user who authenticated, not the target user sudo switched to. */
+        const void *fp = NULL, *seen = NULL;
+        if (pam_get_data(pamh, "yogafp_auth_uid", &seen) == PAM_SUCCESS && seen &&
+            (pam_get_data(pamh, "yogafp_fingerprint", &fp) != PAM_SUCCESS || !fp))
+            report_password(*(const uid_t *)seen);
     }
     return PAM_SUCCESS;
 }
