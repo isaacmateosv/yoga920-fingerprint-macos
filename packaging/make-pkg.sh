@@ -14,7 +14,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 FWEXT=""
 while [[ $# -gt 0 ]]; do case "$1" in --fwext) FWEXT="$2"; shift 2 ;; *) echo "unknown option $1"; exit 1 ;; esac; done
 VERSION="$(sed -n "s/^__version__ = '\(.*\)'/\1/p" "$ROOT/yogafp/__init__.py")"
-NAME="YogaFP-$VERSION$([[ -n "$FWEXT" ]] && echo -personal)"
+NAME="YogaFP-$VERSION"; if [[ -n "$FWEXT" ]]; then NAME="$NAME-personal"; fi
 DIST="$ROOT/dist"; WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 STAGE="$WORK/root/usr/local/share/yoga-fp-installer"; PB="$STAGE/prebuilt"
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
@@ -129,5 +129,5 @@ hdiutil create -quiet -volname "YogaFP $VERSION" -srcfolder "$DMGSRC" -ov -forma
 say "Done:"
 ls -lh "$DIST/$NAME.pkg" "$DIST/$NAME.dmg" | awk '{print "    " $5 "  " $NF}'
 shasum -a 256 "$DIST/$NAME.pkg" "$DIST/$NAME.dmg" | sed 's/^/    /'
-[[ -n "$FWEXT" ]] && echo "    PERSONAL build (contains Lenovo firmware): keep it private, e.g. on your rescue USB."
+if [[ -n "$FWEXT" ]]; then echo "    PERSONAL build (contains Lenovo firmware): keep it private, e.g. on your rescue USB."; fi
 exit 0
