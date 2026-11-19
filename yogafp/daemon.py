@@ -285,6 +285,9 @@ class Daemon:
             if op == 'setup':
                 if not is_root:
                     raise core.FPError('root only')
+                if sensor.ready and not req.get('force'):
+                    # Already open: re-initializing a live session makes this sensor reboot (and drop off USB).
+                    return {'sensor_ready': True, 'note': 'already open'}
                 emit({'event': 'status', 'msg': 'Pairing / loading firmware / calibrating (may reboot the sensor)'})
                 sensor.open()
                 return {'sensor_ready': True}
