@@ -82,7 +82,53 @@ static NSString *requesting_app(Mech *m) {
     NSString *p = hint_string(m, "client-path");
     if (!p.length) return @"An application";
     for (NSString *c in p.pathComponents) if ([c hasSuffix:@".app"]) return c.stringByDeletingPathExtension;
-    return p.lastPathComponent.length ? p.lastPathComponent : @"An application";
+    // Apple background services are plain programs; show the names people know (Apple's own dialog does the same).
+    static NSDictionary *friendly;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        friendly = @{@"appstoreagent": @"App Store", @"storedownloadd": @"App Store", @"installd": @"Installer",
+                     @"system_installd": @"Installer", @"softwareupdated": @"Software Update",
+                     @"SoftwareUpdateNotificationManager": @"Software Update", @"writeconfig": @"System Settings",
+                     @"writeconfig.xpc": @"System Settings", @"security_authtrampoline": @"A script",
+                     @"osascript": @"A script", @"sudo": @"sudo"};
+    });
+    NSString *last = p.lastPathComponent;
+    for (NSString *c in p.pathComponents) if ([c hasSuffix:@".xpc"] && friendly[c]) return friendly[c];
+    return friendly[last] ?: (last.length ? last : @"An application");
+}
+
+// Who is asking, from the requester's code signature: helps spot a strange request ("appstoreagent?").
+static NSString *requester_origin(Mech *m, BOOL *warn) {
+    *warn = NO;
+    NSString *p = hint_string(m, "client-path");
+    if (!p.length) return @"Requester unknown";
+    SecStaticCodeRef code = NULL;
+    if (SecStaticCodeCreateWithPath((__bridge CFURLRef)[NSURL fileURLWithPath:p], kSecCSDefaultFlags, &code) != errSecSuccess || !code) {
+        *warn = YES; return [NSString stringWithFormat:@"Unverified program: %@", p];
+    }
+    NSString *res = nil;
+    SecRequirementRef apple = NULL;
+    if (SecRequirementCreateWithString(CFSTR("anchor apple"), kSecCSDefaultFlags, &apple) == errSecSuccess &&
+        SecStaticCodeCheckValidity(code, kSecCSDefaultFlags, apple) == errSecSuccess) {
+        res = @"Apple system component";
+    } else {
+        CFDictionaryRef info = NULL;
+        if (SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info) == errSecSuccess && info) {
+            NSArray *certs = (__bridge NSArray *)CFDictionaryGetValue(info, kSecCodeInfoCertificates);
+            if (certs.count) {
+                CFStringRef cn = NULL;
+                SecCertificateCopyCommonName((__bridge SecCertificateRef)certs[0], &cn);
+                NSString *name = cn ? (__bridge_transfer NSString *)cn : @"a developer";
+                name = [name stringByReplacingOccurrencesOfString:@"Developer ID Application: " withString:@""];
+                res = [NSString stringWithFormat:@"Signed by %@", name];
+            }
+            CFRelease(info);
+        }
+        if (!res) { *warn = YES; res = [NSString stringWithFormat:@"Unsigned program: %@", p]; }
+    }
+    if (apple) CFRelease(apple);
+    CFRelease(code);
+    return res;
 }
 
 static BOOL user_is_admin(uid_t uid) {
@@ -249,7 +295,7 @@ static int next_attempt(AuthorizationEngineRef engine) {
     self.selfUser = p ? @(p->pw_name) : @"";
     BOOL retry = [ctx_string(m, CTX_FAILED) isEqualToString:@"1"] || next_attempt(m->engine) > 1;
 
-    NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 420, 250)
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 420, 270)
                                               styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                 backing:NSBackingStoreBuffered defer:NO];
     w.title = @""; w.delegate = self; w.level = NSModalPanelWindowLevel + 1; w.releasedWhenClosed = NO;
@@ -257,13 +303,20 @@ static int next_attempt(AuthorizationEngineRef engine) {
     NSView *v = w.contentView;
 
     self.icon = [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:@"touchid" accessibilityDescription:@"Fingerprint"]];
-    self.icon.frame = NSMakeRect(20, 178, 52, 52);
+    self.icon.frame = NSMakeRect(20, 198, 52, 52);
     self.icon.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:40 weight:NSFontWeightRegular];
     self.icon.contentTintColor = NSColor.controlAccentColor;
     [v addSubview:self.icon];
 
     NSTextField *title = [NSTextField wrappingLabelWithString:[NSString stringWithFormat:@"%@ wants to make changes.", requesting_app(m)]];
-    title.font = [NSFont boldSystemFontOfSize:13]; title.frame = NSMakeRect(86, 206, 314, 22); [v addSubview:title];
+    title.font = [NSFont boldSystemFontOfSize:13]; title.frame = NSMakeRect(86, 226, 314, 22); [v addSubview:title];
+    BOOL warn = NO;
+    NSString *origin = requester_origin(m, &warn);
+    NSTextField *orig = [NSTextField labelWithString:[NSString stringWithFormat:@"%@%@", warn ? @"⚠︎ " : @"", origin]];
+    orig.font = [NSFont systemFontOfSize:11]; orig.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    orig.textColor = warn ? NSColor.systemOrangeColor : NSColor.secondaryLabelColor;
+    orig.toolTip = hint_string(m, "client-path");
+    orig.frame = NSMakeRect(86, 206, 314, 18); [v addSubview:orig];
     NSTextField *info = [NSTextField wrappingLabelWithString:@"Touch the fingerprint sensor or enter an administrator's password to allow this."];
     info.font = [NSFont systemFontOfSize:11]; info.frame = NSMakeRect(86, 172, 314, 32); [v addSubview:info];
 

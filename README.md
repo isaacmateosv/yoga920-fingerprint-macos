@@ -152,6 +152,9 @@ After installing, the same commands are available as `sudo /usr/local/libexec/yo
 * **Safe rollout:** `sudo ./install.sh admin-test` first proves both paths on a private test right (it passes only
   on the root step's own log line); `enable-admin` backs up the original definitions, self-checks and rolls back
   automatically; `sudo ./install.sh disable-admin` restores the originals. `sudo` never depends on the plugin.
+* **Who is asking:** the dialog names the requester (Apple background services get their familiar names, e.g.
+  "App Store", "Installer", "Software Update") and shows its code-signing origin: *Apple system component*,
+  *Signed by <developer>*, or an orange *⚠︎ Unsigned program* (with the path) — a cue to cancel anything unexpected.
 * Logs without secrets: `/var/log/yogafp-auth.log` (root step), `~/Library/Logs/yogafp-auth.log` (dialog).
 * **Password-only panes:** Users & Groups and Privacy & Security extract the administrator's *password* from the
   approval (e.g. to create accounts or manage FileVault). A fingerprint approval carries no password, so these keep
