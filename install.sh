@@ -141,7 +141,7 @@ cmd_install() {
     warn "$py is not a python.org framework build: using a venv. Its base runtime stays admin-writable (see README)."
     "$py" -m venv "$PREFIX.new/runtime"
   fi
-  "$PREFIX.new/runtime/bin/python3" -I -m pip install -q --no-cache-dir --disable-pip-version-check --upgrade \
+  "$PREFIX.new/runtime/bin/python3" -I -m pip install -q --no-cache-dir --disable-pip-version-check --root-user-action=ignore --upgrade \
       --only-binary=:all: pip -r "$HERE/requirements.txt"
   command -v cc >/dev/null || die "a C compiler is required (xcode-select --install)"
   local build; build="$(mktemp -d)"; cp "$HERE/pam/"*.c "$HERE/pam/Makefile" "$build/"
@@ -279,7 +279,7 @@ cmd_update() {   # upgrade Python dependencies to the newest stable releases in 
   need_root
   [[ -x "$PREFIX/runtime/bin/python3" ]] || die "yoga-fp is not installed"
   say "Upgrading dependencies"
-  "$PREFIX/runtime/bin/python3" -I -m pip install -q --no-cache-dir --disable-pip-version-check --upgrade \
+  "$PREFIX/runtime/bin/python3" -I -m pip install -q --no-cache-dir --disable-pip-version-check --root-user-action=ignore --upgrade \
       --only-binary=:all: pip -r "$PREFIX/requirements.txt"
   chown -R root:wheel "$PREFIX"; chmod -R go-w "$PREFIX"
   "$PREFIX/runtime/bin/python3" -I -m pip list --format=freeze 2>/dev/null | grep -iE '^(numpy|opencv|cryptography|pyusb|libusb)'
