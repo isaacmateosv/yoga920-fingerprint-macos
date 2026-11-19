@@ -1,4 +1,5 @@
-/* authtest - request one authorization right, the way an app asking for admin rights does.
+/* authtest (installed as "YogaFP Self-Check") - request one authorization right, the way an app asking for admin
+ * rights does; the dialog shows the program name, hence the friendly install name.
  * Used by the installer to prove the plugin works on a private test right before any system right is changed.
  *   usage: authtest <right-name>          exit 0 = granted */
 #include <Security/Authorization.h>

@@ -27,6 +27,7 @@ SOCK=/var/run/yogafpd.sock
 SUDO_LOCAL=/etc/pam.d/sudo_local
 APP=/Applications/YogaFP.app
 AUTHPLUGIN=/Library/Security/SecurityAgentPlugins/YogaFPAuth.bundle
+SELFCHECK="/usr/local/libexec/yoga-fp/YogaFP Self-Check"   # name shown in the test dialogs ("... wants to make changes")
 AUTHDB_BACKUP="$DATA/authdb-backup"
 # Admin prompts handled by the plugin. System Settings uses one right per pane, not just system.preferences.
 # Excluded on purpose: panes that extract the administrator's PASSWORD from the authorization afterwards
@@ -316,7 +317,7 @@ install_authplugin() {
   make -s -C "$b" >/dev/null || { rm -rf "$b"; die "building the authorization plugin failed"; }
   rm -rf "$AUTHPLUGIN"; cp -R "$b/YogaFPAuth.bundle" "$AUTHPLUGIN"
   chown -R root:wheel "$AUTHPLUGIN"; chmod -R go-w "$AUTHPLUGIN"
-  install -m 755 -o root -g wheel "$b/authtest" "$PREFIX/authtest"
+  install -m 755 -o root -g wheel "$b/authtest" "$SELFCHECK"
   rm -rf "$b"
 }
 
@@ -342,11 +343,11 @@ cmd_admin_test() {
   local o1 r1 l1 o2 r2 l2
   o1=$(stat -f %z "$AUTHLOG")
   say "Test 1/2: one dialog appears. TOUCH THE SENSOR (do not type anything)."
-  r1="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"
+  r1="$(sudo -u "$user" "$SELFCHECK" "$TEST_RIGHT" 2>&1 || true)"
   l1="$(authlog_since "$o1")"; echo "    result: $r1"; sed 's/^/    root step: /' <<<"$l1" | tail -3
   o2=$(stat -f %z "$AUTHLOG")
   say "Test 2/2: the dialog appears again. TYPE YOUR PASSWORD and press OK (do not touch the sensor)."
-  r2="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"
+  r2="$(sudo -u "$user" "$SELFCHECK" "$TEST_RIGHT" 2>&1 || true)"
   l2="$(authlog_since "$o2")"; echo "    result: $r2"; sed 's/^/    root step: /' <<<"$l2" | tail -3
   security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1 || true
 
@@ -371,7 +372,7 @@ cmd_admin_test_define() {   # keep the private test right defined for manual/dia
   install_authplugin
   right_def false 0 | security authorizationdb write "$TEST_RIGHT" >/dev/null 2>&1 || die "could not create the test right"
   say "Test right $TEST_RIGHT is defined. Request it as your normal user (no sudo):"
-  echo "      $PREFIX/authtest $TEST_RIGHT"
+  echo "      \"$SELFCHECK\" $TEST_RIGHT"
   say "Remove it with: sudo $0 admin-test-remove"
 }
 
@@ -415,7 +416,7 @@ cmd_enable_admin() {
   done
   say "Self-check: an admin request appears now - touch the sensor (or use your password)."
   touch "$AUTHLOG"; local off; off=$(stat -f %z "$AUTHLOG")
-  local res; res="$(sudo -u "$user" "$PREFIX/authtest" system.privilege.admin 2>&1 || true)"; echo "    -> $res"
+  local res; res="$(sudo -u "$user" "$SELFCHECK" system.privilege.admin 2>&1 || true)"; echo "    -> $res"
   if [[ "$res" != granted ]] || ! authlog_since "$off" | grep -q "grant: .* accepted"; then
     warn "self-check failed ($res); restoring the original definitions"
     cmd_disable_admin
