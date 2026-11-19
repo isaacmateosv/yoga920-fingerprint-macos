@@ -32,11 +32,14 @@ AUTHDB_BACKUP="$DATA/authdb-backup"
 # Excluded on purpose: panes that extract the administrator's PASSWORD from the authorization afterwards
 # (Users & Groups creates/edits accounts with it; Privacy & Security for FileVault etc.). A fingerprint approval
 # carries no password, so those panes must keep the standard password dialog.
-ADMIN_RIGHTS=(system.privilege.admin system.install.software system.preferences
+# Not system.preferences: loginwindow evaluates it non-interactively during login (FileVault auto-login).
+ADMIN_RIGHTS=(system.privilege.admin system.install.software
               system.preferences.network system.preferences.sharing system.preferences.datetime
               system.preferences.energysaver system.preferences.printing system.preferences.startupdisk
               system.preferences.timemachine)
 NEEDS_PASSWORD_RIGHTS=(system.preferences.accounts system.preferences.security)
+# Rights an older version switched that must go back to Apple's definition (restored by enable/disable-admin).
+RETIRED_RIGHTS=(system.preferences)
 TEST_RIGHT=com.yogafp.test
 CHECK_SVC=/etc/pam.d/yogafp-check
 PAM_LINE="auth       sufficient     $PAMMOD"
@@ -391,9 +394,9 @@ cmd_enable_admin() {
     fi
   done
   local x
-  for x in "${NEEDS_PASSWORD_RIGHTS[@]}"; do                # undo an older version that switched these
+  for x in "${NEEDS_PASSWORD_RIGHTS[@]}" "${RETIRED_RIGHTS[@]}"; do   # undo an older version that switched these
     [[ -f "$AUTHDB_BACKUP/$x.plist" ]] && security authorizationdb write "$x" < "$AUTHDB_BACKUP/$x.plist" >/dev/null 2>&1 \
-      && say "restored $x (needs the password, keeps the standard dialog)"
+      && say "restored $x (keeps Apple's standard definition)"
   done
   local eligible=()
   for r in "${ADMIN_RIGHTS[@]}"; do                         # only plain "authenticate an admin" rules
@@ -426,7 +429,7 @@ cmd_enable_admin() {
 cmd_disable_admin() {
   need_root
   local r n=0
-  for r in "${ADMIN_RIGHTS[@]}" "${NEEDS_PASSWORD_RIGHTS[@]}"; do
+  for r in "${ADMIN_RIGHTS[@]}" "${NEEDS_PASSWORD_RIGHTS[@]}" "${RETIRED_RIGHTS[@]}"; do
     if [[ -f "$AUTHDB_BACKUP/$r.plist" ]]; then
       security authorizationdb write "$r" < "$AUTHDB_BACKUP/$r.plist" >/dev/null 2>&1 && n=$((n+1)) || warn "could not restore $r"
     fi

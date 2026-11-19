@@ -360,10 +360,36 @@ static OSStatus MechanismInvoke(AuthorizationMechanismRef inMechanism) {
     Mech *m = (Mech *)inMechanism;
     @autoreleasepool {
         if (m->kind == 1) { invoke_grant(m); return errAuthorizationSuccess; }
+
+        // Non-interactive callers (e.g. loginwindow right after the FileVault unlock) pass the credentials in the
+        // authorization environment and expect no UI. Behave like Apple's rule: hand them to the root step, which
+        // verifies them. Never show a window for these.
+        NSString *hu = hint_string(m, kAuthorizationEnvironmentUsername);
+        NSString *hp = hint_string(m, kAuthorizationEnvironmentPassword);
+        if (hu.length && hp.length) {
+            ctx_set(m, CTX_METHOD, @"password", 0);
+            ctx_set(m, kAuthorizationEnvironmentUsername, hu, kAuthorizationContextFlagExtractable);
+            ctx_set(m, CTX_PASS, hp, 0);
+            logline(@"ui: credentials supplied by the caller for %@; no dialog", hu);
+            m->plugin->cb->SetResult(m->engine, kAuthorizationResultAllow);
+            return errAuthorizationSuccess;
+        }
+
+        __block BOOL shown = NO;
         dispatch_async(dispatch_get_main_queue(), ^{
+            shown = YES;
             YFPDialog *dlg = [YFPDialog new];
             m->dialog = (__bridge_retained void *)dlg;
             [dlg showFor:m];
+        });
+        // No desktop / UI session yet (e.g. during login): never block the caller. If the dialog could not even
+        // be put on screen within 6 s, decline so macOS continues immediately instead of waiting minutes.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_SEC), dispatch_get_global_queue(0, 0), ^{
+            if (!shown && !m->deactivated) {
+                logline(@"ui: no UI session to show the dialog; declining");
+                m->deactivated = 1;
+                m->plugin->cb->SetResult(m->engine, kAuthorizationResultUndefined);
+            }
         });
     }
     return errAuthorizationSuccess;
