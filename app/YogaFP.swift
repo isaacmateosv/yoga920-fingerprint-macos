@@ -418,7 +418,8 @@ struct AuthPanelView: View {
                 .foregroundStyle(m.authPhase == .success ? .green : m.authPhase == .failure ? .red : .accentColor)
                 .symbolEffect(.pulse, isActive: m.authPhase == .working)
             VStack(alignment: .leading, spacing: 4) {
-                Text(m.authService == "admin" ? "An app wants administrator rights" : "\(m.authService ?? "sudo") is requesting authentication").font(.headline)
+                Text(m.authService == "admin" ? "An app wants administrator rights" : "\(m.authService ?? "sudo") is requesting authentication")
+                    .font(.headline).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 Text(m.authMessage).font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
@@ -427,7 +428,7 @@ struct AuthPanelView: View {
             }
         }
         .padding(16)
-        .frame(width: 420)
+        .frame(width: 500)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
     }
 }
@@ -436,7 +437,7 @@ final class AuthPanel {
     static var panel: NSPanel?
     @MainActor static func show(_ m: Model) {
         if panel == nil {
-            let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 80),
+            let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 500, height: 84),
                             styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
             p.isFloatingPanel = true
             p.level = .statusBar
@@ -450,11 +451,56 @@ final class AuthPanel {
         }
         if let screen = NSScreen.main, let p = panel {
             let f = screen.visibleFrame
-            p.setFrameOrigin(NSPoint(x: f.midX - 210, y: f.maxY - 110))
+            if let hv = p.contentView { p.setContentSize(hv.fittingSize) }
+            p.setFrameOrigin(NSPoint(x: f.midX - p.frame.width / 2, y: f.maxY - p.frame.height - 30))
         }
         panel?.orderFrontRegardless()
     }
     @MainActor static func hide() { panel?.orderOut(nil) }
+}
+
+let repoURL = URL(string: "https://github.com/isaacmateosv/yoga920-fingerprint-macos")!
+
+struct AboutView: View {
+    @ObservedObject var m: Model
+    var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?" }
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96)
+            Text("YogaFP").font(.title).bold()
+            Text("Version \(version)").foregroundStyle(.secondary)
+            Text("Fingerprint sign-in for sudo and admin dialogs on the Lenovo Yoga 920 (Synaptics/Validity 06cb:0081) under macOS.")
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Your fingerprint never leaves this Mac. It is stored as encrypted feature points, not images, in a root-only folder.", systemImage: "lock.shield")
+                Label("A root service makes every match decision. Your password always works as a fallback.", systemImage: "person.badge.key")
+                Label("Like Touch ID: password needed after 48 hours or 5 failed attempts.", systemImage: "clock.arrow.circlepath")
+            }.font(.callout).fixedSize(horizontal: false, vertical: true)
+            Divider()
+            Text("Status: \(m.statusLine) · Fingers: \(m.fingers.count)/3").font(.caption).foregroundStyle(.secondary)
+            Text("Built on python-validity (MIT). Lenovo/Synaptics firmware is not included; the installer verifies the official package. Not affiliated with Lenovo, Synaptics or Apple.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("How it works") { NSWorkspace.shared.open(repoURL.appendingPathComponent("blob/main/README.md")) }
+                Button("Project on GitHub") { NSWorkspace.shared.open(repoURL) }
+            }
+        }
+        .padding(24).frame(width: 420)
+    }
+}
+
+final class AboutWindow {
+    static var window: NSWindow?
+    @MainActor static func show(_ m: Model) {
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 520), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            w.title = "About YogaFP"; w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: AboutView(m: m))
+            window = w
+        }
+        window!.center(); NSApp.activate(ignoringOtherApps: true); window!.makeKeyAndOrderFront(nil)
+    }
 }
 
 struct MenuContent: View {
@@ -484,6 +530,7 @@ struct MenuContent: View {
             a.runModal()
         }
         Button("Refresh") { m.refresh() }
+        Button("About YogaFP") { m.refresh(); AboutWindow.show(m) }
         Divider()
         Button("Quit YogaFP") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }
