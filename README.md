@@ -19,6 +19,7 @@ firmware cannot match fingerprints on-chip.
  yogafpd  (root LaunchDaemon)  ── encrypted templates  /Library/Application Support/yoga-fp  (root, 0700)
    │  UNIX socket, caller identified by the kernel        key: System keychain
    ├── pam_yogafp.so  → sudo (via /etc/pam.d/sudo_local)
+   ├── YogaFPAuth.bundle → admin dialogs (authorization plugin, optional)
    ├── yogafp CLI
    └── YogaFP menu bar app (status, enrollment, sudo prompt panel)
 ```
@@ -68,6 +69,24 @@ sudo ./install.sh enable-sudo                      # optional: fingerprint for s
 Tuning: `sudo yogafp set-threshold N` (default 10). Other commands: `sudo ./install.sh update`, `yogafp verify`, `yogafp add 5` (more touches for an area that fails), `yogafp delete`,
 `./install.sh status`, `sudo ./install.sh disable-sudo`, `sudo ./install.sh uninstall [--purge]`.
 
+## Admin dialogs (optional)
+
+`sudo ./install.sh enable-admin` adds fingerprint to macOS admin prompts — apps asking for administrator rights
+(`system.privilege.admin`), package installers (`system.install.software`) and System Settings unlocks
+(`system.preferences`) — via an authorization plugin (`authplugin/`, installed in
+`/Library/Security/SecurityAgentPlugins`). One dialog offers both: touch the sensor **or** type your password.
+
+* **The dialog decides nothing.** It runs in SecurityAgent (as you) and starts a fingerprint verify tagged with a
+  random one-time nonce. The **root** step then asks the daemon to consume that nonce: accepted only if the daemon
+  itself recorded a real match for that user within 60 s, once. Passwords are checked by the root step with
+  OpenDirectory. Both paths require admin group membership.
+* **Safe rollout:** `sudo ./install.sh admin-test` first proves both paths on a private test right (it passes only
+  on the root step's own log line); `enable-admin` backs up the original definitions, self-checks and rolls back
+  automatically; `sudo ./install.sh disable-admin` restores the originals. `sudo` never depends on the plugin.
+* Logs without secrets: `/var/log/yogafp-auth.log` (root step), `~/Library/Logs/yogafp-auth.log` (dialog).
+* **Not possible:** the Passwords app, Keychain prompts, Apple Pay and the App Store use LocalAuthentication, which
+  only accepts Apple's Touch ID hardware.
+
 ## Security model
 
 * **Biometric data never leaves the machine and is never written as an image.** Frames live in memory; only
@@ -95,6 +114,8 @@ Tuning: `sudo yogafp set-threshold N` (default 10). Other commands: `sudo ./inst
 * **Small sensor.** 112×112 px partial prints; accuracy depends on good enrollment coverage. Measure with
   `yogafp test` before relying on it. The threshold favours rejecting over accepting.
 * **Lock screen / login are not supported.** macOS offers no supported way for third-party readers there.
+* **Admin dialogs** use an authorization plugin; a broken plugin can affect admin prompts. Keep `disable-admin`
+  handy (Terminal `sudo` with your password is independent of it) and a bootable rescue USB.
 
 ## Updates & dependencies
 

@@ -439,6 +439,7 @@ class Capture:
         while time.time() - t0 < timeout:
             diff = self.wait_finger(timeout - (time.time() - t0))
             if diff is None:
+                log.info('no finger detected within %.0fs', timeout)
                 return None
             cov = coverage(diff)
             if cov >= MIN_COVERAGE:

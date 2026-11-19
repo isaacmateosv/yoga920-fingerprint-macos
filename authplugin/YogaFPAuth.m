@@ -126,6 +126,21 @@ static NSDictionary *daemon_call_once(NSDictionary *req, int timeout_s) {   // o
     return res;
 }
 
+// Attempts per authorization evaluation, kept in the SecurityAgent process: authd re-runs the ui mechanism for
+// each try with the same engine, but does not hand the grant step's "failed" marker back to it.
+static NSMutableDictionary<NSString *, NSArray *> *gAttempts;     // engine -> @[count, last time]
+static int next_attempt(AuthorizationEngineRef engine) {
+    static dispatch_once_t once; dispatch_once(&once, ^{ gAttempts = [NSMutableDictionary dictionary]; });
+    NSString *k = [NSString stringWithFormat:@"%p", (void *)engine];
+    NSArray *prev = gAttempts[k];
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    // an engine address can be reused by a later, unrelated request: only count attempts within 2 minutes
+    int n = (prev && now - [prev[1] doubleValue] < 120) ? [prev[0] intValue] + 1 : 1;
+    gAttempts[k] = @[@(n), @(now)];
+    if (gAttempts.count > 64) [gAttempts removeAllObjects];
+    return n;
+}
+
 // ------------------------------------------------------------------ the dialog (SecurityAgent, runs as the user)
 @interface YFPDialog : NSObject <NSWindowDelegate>
 @property (assign) Mech *mech;
@@ -232,7 +247,7 @@ static NSDictionary *daemon_call_once(NSDictionary *req, int timeout_s) {   // o
     self.mech = m; self.fpfd = -1;
     struct passwd *p = getpwuid(getuid());
     self.selfUser = p ? @(p->pw_name) : @"";
-    BOOL retry = [ctx_string(m, CTX_FAILED) isEqualToString:@"1"];
+    BOOL retry = [ctx_string(m, CTX_FAILED) isEqualToString:@"1"] || next_attempt(m->engine) > 1;
 
     NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 420, 250)
                                               styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
@@ -273,8 +288,8 @@ static NSDictionary *daemon_call_once(NSDictionary *req, int timeout_s) {   // o
     [NSApp activateIgnoringOtherApps:YES];
     [w makeKeyAndOrderFront:nil];
     logline(@"dialog: shown for %@ (retry=%d)", requesting_app(m), retry);
-    if (retry) [self setStatus:@"Incorrect user name or password. Try again." ok:NO];
-    else [self startFingerprint];
+    [self startFingerprint];
+    if (retry) [self setStatus:@"Incorrect password. Try again, or touch the sensor." ok:NO];
 }
 @end
 
