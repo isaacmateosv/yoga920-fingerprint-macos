@@ -160,17 +160,19 @@ final class Model: ObservableObject {
 
     // MARK: Setup Assistant helpers
 
-    nonisolated static func shell(_ path: String, _ args: [String]) -> String {
+    nonisolated static func shell(_ path: String, _ args: [String]) -> String { run(path, args).out }
+
+    nonisolated static func run(_ path: String, _ args: [String]) -> (out: String, ok: Bool) {
         let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
-        do { try p.run() } catch { return "" }
+        do { try p.run() } catch { return ("", false) }
         let d = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
-        return String(data: d, encoding: .utf8) ?? ""
+        return (String(data: d, encoding: .utf8) ?? "", p.terminationStatus == 0)
     }
 
     /// Run the installed admin helper with administrator rights (standard macOS prompt, or our fingerprint dialog).
     /// The command and prompt are passed to osascript as arguments, so no AppleScript escaping is involved.
-    func runAdmin(_ steps: [String], title: String) {
+    func runAdmin(_ steps: [String], title: String, then: ((Bool) -> Void)? = nil) {
         guard !setupBusy else { return }
         let helper = "/usr/local/libexec/yoga-fp/yogafp-admin.sh"
         let user = NSUserName().filter { $0.isLetter || $0.isNumber || "._-".contains($0) }
@@ -179,24 +181,64 @@ final class Model: ObservableObject {
                     "do shell script (item 1 of argv) with administrator privileges with prompt (item 2 of argv)",
                     "-e", "end run", cmd, "YogaFP: \(title)"]
         setupBusy = true
-        setupLog = "\(title)...\nTouch the fingerprint sensor when the YogaFP panel asks (usually twice).\n"
+        setupLog += "\n\(title)…\n"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let out = Model.shell("/usr/bin/osascript", args)
+            let r = Model.run("/usr/bin/osascript", args)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.setupBusy = false
-                let clean = out.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
-                self.setupLog += clean.isEmpty ? "(no output)" : clean
+                let clean = r.out.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
+                self.setupLog += clean.isEmpty ? (r.ok ? "done\n" : "cancelled\n") : clean
                 self.refresh()
+                then?(r.ok)
+            }
+        }
+    }
+
+    func enableSudo() {
+        setupLog = "Touch the sensor when the YogaFP panel asks (twice): once to test the module, once to confirm sudo still loads.\n"
+        runAdmin(["enable-sudo"], title: "Turning on fingerprint for sudo")
+    }
+
+    /// Admin dialogs: the self-check dialogs must appear in the user's desktop session, so the app runs them itself.
+    /// Root-only parts (test permission, enabling) go through the admin prompt.
+    func enableAdmin() {
+        setupLog = "Step 1 of 3: preparing a private test permission (admin prompt).\n"
+        runAdmin(["admin-test-define"], title: "Preparing the admin-dialog test") { [weak self] ok in
+            guard let self, ok else { self?.setupLog += "Nothing was changed.\n"; return }
+            self.setupBusy = true
+            self.setupLog += "Step 2 of 3: test 1 — a YogaFP dialog appears: TOUCH THE SENSOR (don't type).\n"
+            let check = "/usr/local/libexec/yoga-fp/YogaFP Self-Check"
+            DispatchQueue.global(qos: .userInitiated).async {
+                let t1 = Model.run(check, ["com.yogafp.test"]).out.contains("granted")
+                DispatchQueue.main.async { self.setupLog += t1 ? "  fingerprint: granted ✓\n" : "  fingerprint: not granted ✗\n"
+                    self.setupLog += "Test 2 — the dialog appears again: TYPE YOUR PASSWORD and press OK (don't touch).\n" }
+                let t2 = t1 && Model.run(check, ["com.yogafp.test"]).out.contains("granted")
+                DispatchQueue.main.async {
+                    self.setupBusy = false
+                    if t1 { self.setupLog += t2 ? "  password: granted ✓\n" : "  password: not granted ✗\n" }
+                    if t1 && t2 {
+                        self.setupLog += "Step 3 of 3: enabling for real admin dialogs (admin prompt).\n"
+                        self.runAdmin(["admin-test-remove", "enable-admin --app-tested"], title: "Enabling fingerprint for admin dialogs")
+                    } else {
+                        self.setupLog += "The test did not pass; admin dialogs stay unchanged.\n"
+                        self.runAdmin(["admin-test-remove"], title: "Removing the test permission")
+                    }
+                }
             }
         }
     }
 
     func toggleLoginItem() {
         do {
-            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
-            else { try SMAppService.mainApp.register() }
-        } catch { setupLog = "Login item: \(error.localizedDescription)" }
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+                setupLog = "YogaFP will no longer start at login.\n"
+            } else {
+                try SMAppService.mainApp.register()
+                setupLog = "YogaFP will start at login. (It is listed under System Settings → General → Login Items.)\n"
+            }
+        } catch { setupLog = "Login item: \(error.localizedDescription)\n" }
         refresh()
     }
 
@@ -555,11 +597,11 @@ struct SetupView: View {
             }
             SetupStep(n: 3, title: "Use fingerprint for sudo", detail: m.sudoEnabled ? "On. Terminal sudo asks for your finger first." : "Tested in isolation first; rolls back automatically if anything fails.",
                       done: m.sudoEnabled, action: m.sudoEnabled ? "Turn off" : "Turn on", enabled: m.enrolled && !m.setupBusy) {
-                m.runAdmin([m.sudoEnabled ? "disable-sudo" : "enable-sudo"], title: m.sudoEnabled ? "turn off fingerprint for sudo" : "turn on fingerprint for sudo")
+                if m.sudoEnabled { m.setupLog = ""; m.runAdmin(["disable-sudo"], title: "Turning off fingerprint for sudo") } else { m.enableSudo() }
             }
             SetupStep(n: 4, title: "Use fingerprint for admin dialogs", detail: m.adminEnabled ? "On for app admin requests, installers and most System Settings panes." : "Runs a private test first (touch, then type your password), then enables with automatic rollback.",
                       done: m.adminEnabled, action: m.adminEnabled ? "Turn off" : "Turn on", enabled: m.enrolled && !m.setupBusy) {
-                m.runAdmin(m.adminEnabled ? ["disable-admin"] : ["admin-test", "enable-admin"], title: m.adminEnabled ? "turn off fingerprint for admin dialogs" : "turn on fingerprint for admin dialogs")
+                if m.adminEnabled { m.setupLog = ""; m.runAdmin(["disable-admin"], title: "Turning off fingerprint for admin dialogs") } else { m.enableAdmin() }
             }
             SetupStep(n: 5, title: "Start YogaFP at login", detail: "Keeps the menu bar icon and the sudo panel available.",
                       done: m.loginItemEnabled, action: m.loginItemEnabled ? "Turn off" : "Turn on", enabled: !m.setupBusy) { m.toggleLoginItem() }

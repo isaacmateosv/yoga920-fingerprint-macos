@@ -429,7 +429,11 @@ cmd_admin_test_remove() {
 
 cmd_enable_admin() {
   need_root
-  [[ -f "$DATA/admin-test-passed" ]] || die "run 'sudo $0 admin-test' first (it must pass)"
+  # --app-tested: the menu bar app ran both self-check tests itself, in the user's desktop session (an elevated
+  # osascript context has no desktop, so dialogs from here would be invisible), and asks for no second self-check.
+  if [[ -z "${APP_TESTED:-}" ]]; then
+    [[ -f "$DATA/admin-test-passed" ]] || die "run 'sudo $0 admin-test' first (it must pass)"
+  fi
   [[ -d "$AUTHPLUGIN" ]] || die "plugin missing; run admin-test again"
   local user; user="$(target_user)"
   mkdir -p "$AUTHDB_BACKUP"; chmod 700 "$AUTHDB_BACKUP"
@@ -459,6 +463,10 @@ cmd_enable_admin() {
     [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=0
     right_def "$shared" "$timeout" | security authorizationdb write "$r" >/dev/null 2>&1 || { cmd_disable_admin; die "writing $r failed; restored"; }
   done
+  if [[ -n "${APP_TESTED:-}" ]]; then
+    say "Enabled for ${#eligible[@]} admin prompts (tested by the YogaFP app): ${eligible[*]}"
+    return 0
+  fi
   say "Self-check: an admin request appears now - touch the sensor (or use your password)."
   touch "$AUTHLOG"; local off; off=$(stat -f %z "$AUTHLOG")
   local res; res="$(sudo -u "$user" "$SELFCHECK" system.privilege.admin 2>&1 || true)"; echo "    -> $res"
@@ -498,6 +506,7 @@ while [[ $# -gt 0 ]]; do
     --lenovo-exe) LENOVO_EXE="$2"; shift 2 ;;
     --purge) PURGE=--purge; shift ;;
     --user) OPT_USER="$2"; shift 2 ;;
+    --app-tested) APP_TESTED=1; shift ;;
     *) die "unknown option $1" ;;
   esac
 done
