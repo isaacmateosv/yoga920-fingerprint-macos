@@ -4,6 +4,7 @@
 import SwiftUI
 import AppKit
 import Darwin
+import ServiceManagement
 
 let socketPath = "/var/run/yogafpd.sock"
 let cliPath = "/usr/local/bin/yogafp"
@@ -86,6 +87,11 @@ final class Model: ObservableObject {
     @Published var fingers: [String] = []
     @Published var passwordNeeded: String? = nil
     @Published var sudoEnabled = false
+    @Published var adminEnabled = false
+    @Published var loginItemEnabled = false
+    @Published var setupBusy = false
+    @Published var setupLog = ""
+    private var setupShownOnce = false
 
     @Published var title = ""
     @Published var message = ""
@@ -132,6 +138,11 @@ final class Model: ObservableObject {
     func refresh() {
         sudoEnabled = (try? String(contentsOfFile: "/etc/pam.d/sudo_local", encoding: .utf8))?
             .contains("pam_yogafp.so") ?? false
+        loginItemEnabled = SMAppService.mainApp.status == .enabled
+        DispatchQueue.global().async { [weak self] in
+            let on = Model.shell("/usr/bin/security", ["authorizationdb", "read", "system.privilege.admin"]).contains("YogaFPAuth:")
+            DispatchQueue.main.async { self?.adminEnabled = on }
+        }
         DaemonCall().start(["op": "status"], onEvent: { _ in }) { [weak self] r in
             guard let self else { return }
             self.online = r["offline"] as? Bool != true && r["ok"] as? Bool == true
@@ -139,7 +150,54 @@ final class Model: ObservableObject {
             self.enrolled = r["enrolled"] as? Bool ?? false
             self.fingers = r["fingers"] as? [String] ?? []
             self.passwordNeeded = r["password_needed"] as? String
+            // First launch on a fresh install: open the Setup Assistant once if nothing is enrolled yet.
+            if self.online && !self.enrolled && !self.setupShownOnce && !UserDefaults.standard.bool(forKey: "setupDone") {
+                self.setupShownOnce = true
+                SetupWindow.show(self)
+            }
         }
+    }
+
+    // MARK: Setup Assistant helpers
+
+    nonisolated static func shell(_ path: String, _ args: [String]) -> String {
+        let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+        do { try p.run() } catch { return "" }
+        let d = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+        return String(data: d, encoding: .utf8) ?? ""
+    }
+
+    /// Run the installed admin helper with administrator rights (standard macOS prompt, or our fingerprint dialog).
+    /// The command and prompt are passed to osascript as arguments, so no AppleScript escaping is involved.
+    func runAdmin(_ steps: [String], title: String) {
+        guard !setupBusy else { return }
+        let helper = "/usr/local/libexec/yoga-fp/yogafp-admin.sh"
+        let user = NSUserName().filter { $0.isLetter || $0.isNumber || "._-".contains($0) }
+        let cmd = steps.map { "\(helper) \($0) --user \(user)" }.joined(separator: " && ") + " 2>&1"
+        let args = ["-e", "on run argv", "-e",
+                    "do shell script (item 1 of argv) with administrator privileges with prompt (item 2 of argv)",
+                    "-e", "end run", cmd, "YogaFP: \(title)"]
+        setupBusy = true
+        setupLog = "\(title)...\nTouch the fingerprint sensor when the YogaFP panel asks (usually twice).\n"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let out = Model.shell("/usr/bin/osascript", args)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.setupBusy = false
+                let clean = out.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
+                self.setupLog += clean.isEmpty ? "(no output)" : clean
+                self.refresh()
+            }
+        }
+    }
+
+    func toggleLoginItem() {
+        do {
+            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
+            else { try SMAppService.mainApp.register() }
+        } catch { setupLog = "Login item: \(error.localizedDescription)" }
+        refresh()
     }
 
     /// Long-lived connection: the daemon pushes events when sudo (or another PAM service) asks for a fingerprint.
@@ -459,6 +517,82 @@ final class AuthPanel {
     @MainActor static func hide() { panel?.orderOut(nil) }
 }
 
+struct SetupStep: View {
+    let n: Int; let title: String; let detail: String; let done: Bool
+    let action: String?; let enabled: Bool; let perform: () -> Void
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: done ? "checkmark.circle.fill" : "\(n).circle")
+                .font(.title2).foregroundStyle(done ? Color.green : Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.headline)
+                Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            if let a = action { Button(a, action: perform).disabled(!enabled) }
+        }
+    }
+}
+
+struct SetupView: View {
+    @ObservedObject var m: Model
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56)
+                VStack(alignment: .leading) {
+                    Text("YogaFP Setup").font(.title2).bold()
+                    Text("Fingerprint sign-in for sudo and admin dialogs. Your password always keeps working.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            Divider()
+            SetupStep(n: 1, title: "Fingerprint service", detail: m.online ? (m.sensorReady ? "Running, sensor ready." : "Running, waiting for the sensor.") : "Not running. Reinstall YogaFP.",
+                      done: m.online && m.sensorReady, action: nil, enabled: false) {}
+            SetupStep(n: 2, title: "Enroll your finger", detail: m.enrolled ? "Enrolled: \(m.fingers.joined(separator: ", "))." : "About 30 guided touches; asks for an administrator first.",
+                      done: m.enrolled, action: m.enrolled ? "Add finger…" : "Enroll…", enabled: m.online && !m.setupBusy) {
+                if m.enrolled { m.addFinger() } else { TaskWindow.show(m); m.enroll() }
+            }
+            SetupStep(n: 3, title: "Use fingerprint for sudo", detail: m.sudoEnabled ? "On. Terminal sudo asks for your finger first." : "Tested in isolation first; rolls back automatically if anything fails.",
+                      done: m.sudoEnabled, action: m.sudoEnabled ? "Turn off" : "Turn on", enabled: m.enrolled && !m.setupBusy) {
+                m.runAdmin([m.sudoEnabled ? "disable-sudo" : "enable-sudo"], title: m.sudoEnabled ? "turn off fingerprint for sudo" : "turn on fingerprint for sudo")
+            }
+            SetupStep(n: 4, title: "Use fingerprint for admin dialogs", detail: m.adminEnabled ? "On for app admin requests, installers and most System Settings panes." : "Runs a private test first (touch, then type your password), then enables with automatic rollback.",
+                      done: m.adminEnabled, action: m.adminEnabled ? "Turn off" : "Turn on", enabled: m.enrolled && !m.setupBusy) {
+                m.runAdmin(m.adminEnabled ? ["disable-admin"] : ["admin-test", "enable-admin"], title: m.adminEnabled ? "turn off fingerprint for admin dialogs" : "turn on fingerprint for admin dialogs")
+            }
+            SetupStep(n: 5, title: "Start YogaFP at login", detail: "Keeps the menu bar icon and the sudo panel available.",
+                      done: m.loginItemEnabled, action: m.loginItemEnabled ? "Turn off" : "Turn on", enabled: !m.setupBusy) { m.toggleLoginItem() }
+            if m.setupBusy || !m.setupLog.isEmpty {
+                ScrollView {
+                    Text(m.setupLog).font(.system(.caption, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                }.frame(height: 110).padding(6).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+            }
+            HStack {
+                if m.setupBusy { ProgressView().controlSize(.small); Text("Working…").font(.caption) }
+                Spacer()
+                Button("Done") { UserDefaults.standard.set(true, forKey: "setupDone"); SetupWindow.window?.close() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22).frame(width: 520)
+    }
+}
+
+final class SetupWindow {
+    static var window: NSWindow?
+    @MainActor static func show(_ m: Model) {
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 520), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            w.title = "YogaFP Setup"; w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: SetupView(m: m))
+            window = w
+        }
+        m.refresh()
+        window!.center(); NSApp.activate(ignoringOtherApps: true); window!.makeKeyAndOrderFront(nil)
+    }
+}
+
 let repoURL = URL(string: "https://github.com/isaacmateosv/yoga920-fingerprint-macos")!
 
 struct AboutView: View {
@@ -468,7 +602,7 @@ struct AboutView: View {
         VStack(spacing: 10) {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96)
             Text("YogaFP").font(.title).bold()
-            Text("Version \(version)").foregroundStyle(.secondary)
+            Text("Version \(version) · Created by isaacmateosv").foregroundStyle(.secondary)
             Text("Fingerprint sign-in for sudo and admin dialogs on the Lenovo Yoga 920 (Synaptics/Validity 06cb:0081) under macOS.")
                 .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             Divider()
@@ -479,7 +613,7 @@ struct AboutView: View {
             }.font(.callout).fixedSize(horizontal: false, vertical: true)
             Divider()
             Text("Status: \(m.statusLine) · Fingers: \(m.fingers.count)/3").font(.caption).foregroundStyle(.secondary)
-            Text("Built on python-validity (MIT). Lenovo/Synaptics firmware is not included; the installer verifies the official package. Not affiliated with Lenovo, Synaptics or Apple.")
+            Text("© 2026 isaacmateosv and contributors · MIT License. Built on python-validity (MIT). Lenovo/Synaptics firmware is not included; the installer verifies the official package. Not affiliated with Lenovo, Synaptics or Apple.")
                 .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("How it works") { NSWorkspace.shared.open(repoURL.appendingPathComponent("blob/main/README.md")) }
@@ -507,7 +641,7 @@ struct MenuContent: View {
     @ObservedObject var m: Model
     var body: some View {
         Text("Fingerprint: \(m.statusLine)")
-        Text("Use for sudo: \(m.sudoEnabled ? "on" : "off")")
+        Text("sudo: \(m.sudoEnabled ? "on" : "off") · admin dialogs: \(m.adminEnabled ? "on" : "off")")
         Divider()
         Button("Test fingerprint…") { TaskWindow.show(m); m.verify() }.disabled(!m.enrolled || !m.online)
         Button(m.enrolled ? "Re-enroll…" : "Enroll fingerprint…") { TaskWindow.show(m); m.enroll() }.disabled(!m.online)
@@ -523,12 +657,7 @@ struct MenuContent: View {
         Divider()
         Button("Delete fingerprint data…") { TaskWindow.show(m); m.deleteData() }.disabled(!m.enrolled || !m.online)
         Divider()
-        Button("How to turn sudo on or off…") {
-            let a = NSAlert()
-            a.messageText = m.sudoEnabled ? "Turn off fingerprint for sudo" : "Use fingerprint for sudo"
-            a.informativeText = "Run in Terminal, from the yoga-fp folder:\n\nsudo ./install.sh \(m.sudoEnabled ? "disable-sudo" : "enable-sudo")\n\nEnabling tests the module with a real touch first and rolls back automatically if anything fails."
-            a.runModal()
-        }
+        Button("Setup Assistant…") { SetupWindow.show(m) }
         Button("Refresh") { m.refresh() }
         Button("About YogaFP") { m.refresh(); AboutWindow.show(m) }
         Divider()

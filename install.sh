@@ -128,12 +128,25 @@ wait_socket() {   # until the daemon actually answers (a stale socket file is no
   for _ in $(seq 1 90); do "$BIN" status >/dev/null 2>&1 && return 0; sleep 0.5; done; return 1
 }
 
+console_user() {   # who is logged in at the screen (for postinstall / app-triggered runs)
+  local u; u="$(stat -f %Su /dev/console 2>/dev/null || true)"
+  [[ -n "$u" && "$u" != root && "$u" != _mbsetupuser ]] && echo "$u"
+}
+
+target_user() {    # the user an enable/test step is for: sudo caller, --user, or the console user
+  local u="${SUDO_USER:-${OPT_USER:-}}"
+  [[ -z "$u" || "$u" == root ]] && u="$(console_user)"
+  [[ -n "$u" && "$u" != root ]] || die "cannot tell which user this is for; pass --user NAME"
+  id "$u" >/dev/null 2>&1 || die "no such user: $u"
+  echo "$u"
+}
+
 cmd_install() {
   need_root
   [[ "$(uname)" == Darwin ]] || die "macOS only"
   sensor_present || die "Synaptics 06cb:0081 not found on USB"
-  local py; py="$(find_python)"
-  say "Python: $py ($("$py" -V 2>&1))"
+  local PB="$HERE/prebuilt"
+  [[ -d "$PB" ]] && say "Using prebuilt components from the package (no compiler or download needed)"
 
   say "Installing to $PREFIX"
   launchctl bootout system/$LABEL 2>/dev/null || true
@@ -141,23 +154,50 @@ cmd_install() {
   rm -rf "$PREFIX.new"; mkdir -p "$PREFIX.new"
   cp -R "$HERE/yogafp" "$HERE/vendor" "$HERE/requirements.txt" "$PREFIX.new/"
   find "$PREFIX.new" -name '__pycache__' -prune -exec rm -rf {} +
-  if ! make_runtime "$py" "$PREFIX.new/runtime"; then
-    warn "$py is not a python.org framework build: using a venv. Its base runtime stays admin-writable (see README)."
-    "$py" -m venv "$PREFIX.new/runtime"
+
+  # Python runtime (private, root-owned)
+  if [[ -x "$PB/runtime/bin/python3" ]]; then
+    ditto "$PB/runtime" "$PREFIX.new/runtime"; say "Python runtime: bundled private copy"
+  else
+    local py; py="$(find_python)"
+    say "Python: $py ($("$py" -V 2>&1))"
+    if ! make_runtime "$py" "$PREFIX.new/runtime"; then
+      warn "$py is not a python.org framework build: using a venv. Its base runtime stays admin-writable (see README)."
+      "$py" -m venv "$PREFIX.new/runtime"
+    fi
+    "$PREFIX.new/runtime/bin/python3" -I -m pip install -q --no-cache-dir --disable-pip-version-check --root-user-action=ignore --upgrade \
+        --only-binary=:all: pip -r "$HERE/requirements.txt"
   fi
-  "$PREFIX.new/runtime/bin/python3" -I -m pip install -q --no-cache-dir --disable-pip-version-check --root-user-action=ignore --upgrade \
-      --only-binary=:all: pip -r "$HERE/requirements.txt"
-  command -v cc >/dev/null || die "a C compiler is required (xcode-select --install)"
-  local build; build="$(mktemp -d)"; cp "$HERE/pam/"*.c "$HERE/pam/Makefile" "$build/"
-  make -s -C "$build" >/dev/null || die "building the PAM module failed"
-  cp "$build/pamcheck" "$PREFIX.new/pamcheck"; cp "$build/pam_yogafp.so" "$PREFIX.new/pam_yogafp.so"; rm -rf "$build"
+
+  # Native components: PAM module, self-check, authorization plugin
+  if [[ -f "$PB/pam_yogafp.so" && -f "$PB/pamcheck" && -d "$PB/YogaFPAuth.bundle" && -f "$PB/authtest" ]]; then
+    cp "$PB/pam_yogafp.so" "$PB/pamcheck" "$PREFIX.new/"
+    ditto "$PB/YogaFPAuth.bundle" "$PREFIX.new/YogaFPAuth.bundle"
+    cp "$PB/authtest" "$PREFIX.new/YogaFP Self-Check"
+  else
+    command -v cc >/dev/null || die "a C compiler is required (xcode-select --install), or use the .pkg"
+    local build; build="$(mktemp -d)"; cp "$HERE/pam/"*.c "$HERE/pam/Makefile" "$build/"
+    make -s -C "$build" >/dev/null || die "building the PAM module failed"
+    cp "$build/pamcheck" "$build/pam_yogafp.so" "$PREFIX.new/"; rm -rf "$build"
+    build="$(mktemp -d)"; cp "$HERE/authplugin/"* "$build/"
+    make -s -C "$build" >/dev/null || die "building the authorization plugin failed"
+    ditto "$build/YogaFPAuth.bundle" "$PREFIX.new/YogaFPAuth.bundle"; cp "$build/authtest" "$PREFIX.new/YogaFP Self-Check"; rm -rf "$build"
+  fi
+  # admin helper for later enable/disable steps (used by the menu bar app's setup assistant)
+  cp "$0" "$PREFIX.new/yogafp-admin.sh"; chmod 755 "$PREFIX.new/yogafp-admin.sh"
   chown -R root:wheel "$PREFIX.new"; chmod -R go-w "$PREFIX.new"
   rm -rf "$PREFIX"; mv "$PREFIX.new" "$PREFIX"
 
   say "Data directory (root-only): $DATA"
   mkdir -p "$DATA/validity"; chmod 700 "$DATA" "$DATA/validity"; chown -R root:wheel "$DATA"
   if [[ ! -f "$DATA/validity/6_07f_Lenovo.xpfwext" ]]; then
-    get_fwext "$DATA/validity/6_07f_Lenovo.xpfwext"; chmod 600 "$DATA/validity/6_07f_Lenovo.xpfwext"
+    if [[ -f "$PB/6_07f_Lenovo.xpfwext" ]]; then FWEXT="$PB/6_07f_Lenovo.xpfwext"; fi
+    if [[ -n "${FWEXT:-}${LENOVO_EXE:-}" ]]; then
+      get_fwext "$DATA/validity/6_07f_Lenovo.xpfwext"; chmod 600 "$DATA/validity/6_07f_Lenovo.xpfwext"
+    else
+      warn "Lenovo firmware file not provided. Fine if this sensor was already set up by yoga-fp on this Mac"
+      warn "(it keeps its firmware and pairing). Otherwise rerun with --lenovo-exe n1cgn08w.exe or --fwext FILE."
+    fi
   fi
 
   if [[ -f "$SUDO_LOCAL" ]] && grep -qF "$PAMMOD" "$SUDO_LOCAL"; then
@@ -178,19 +218,23 @@ EOF
     install_authplugin
   fi
 
-  if command -v swiftc >/dev/null; then
+  # Menu bar app
+  pkill -x YogaFP 2>/dev/null || true
+  if [[ -d "$PB/YogaFP.app" ]]; then
+    rm -rf "$APP"; ditto "$PB/YogaFP.app" "$APP"; say "Menu bar app: $APP"
+  elif command -v swiftc >/dev/null; then
     say "Menu bar app: $APP"
     local abuild; abuild="$(mktemp -d)"; cp "$HERE/app/YogaFP.swift" "$HERE/app/build.sh" "$HERE/app/make_icon.swift" "$abuild/"
     if bash "$abuild/build.sh" >/dev/null 2>&1; then
-      pkill -x YogaFP 2>/dev/null || true
-      rm -rf "$APP"; cp -R "$abuild/build/YogaFP.app" "$APP"; chown -R root:admin "$APP"; chmod -R go-w "$APP"
+      rm -rf "$APP"; cp -R "$abuild/build/YogaFP.app" "$APP"
     else
       warn "menu bar app build failed (the service and sudo still work)"
     fi
     rm -rf "$abuild"
   else
-    warn "swiftc not found: skipping the menu bar app (install Xcode or the Command Line Tools)"
+    warn "swiftc not found: skipping the menu bar app (install Xcode or the Command Line Tools, or use the .pkg)"
   fi
+  [[ -d "$APP" ]] && { chown -R root:admin "$APP"; chmod -R go-w "$APP"; }
 
   sed -e "s#@PREFIX@#$PREFIX#g" -e "s#@DATA@#$DATA#g" -e "s#@LABEL@#$LABEL#g" "$HERE/launchd/yogafpd.plist.in" > "$PLIST"
   chown root:wheel "$PLIST"; chmod 644 "$PLIST"
@@ -199,26 +243,22 @@ EOF
   say "Daemon running. Pairing/firmware/calibration happen on first start (the sensor may reboot a few times)."
   "$BIN" setup || warn "sensor setup reported a problem; see /var/log/yogafpd.log"
   echo
-  local who="${SUDO_USER:-root}"
-  if sudo -u "$who" "$BIN" status 2>/dev/null | grep -q '"enrolled": true'; then
+  local who="${SUDO_USER:-}"; [[ -z "$who" || "$who" == root ]] && who="$(console_user)"
+  if [[ -n "$who" ]] && sudo -u "$who" "$BIN" status 2>/dev/null | grep -q '"enrolled": true'; then
     say "Your fingerprint enrollment was kept."
   else
-    say "Next: enroll your finger (a guided 25-touch process) from the YogaFP menu, or:"
-    echo "      sudo yogafp grant-enroll && yogafp enroll"
+    say "Next: open YogaFP's Setup Assistant (menu bar) to enroll your finger and turn on sudo / admin dialogs."
   fi
-  if ! { [[ -f "$SUDO_LOCAL" ]] && grep -qF "$PAMMOD" "$SUDO_LOCAL"; }; then
-    say "Then optionally:  sudo $0 enable-sudo"
+  if [[ -d "$APP" && -n "$who" ]]; then
+    launchctl asuser "$(id -u "$who")" sudo -u "$who" open "$APP" 2>/dev/null || true
   fi
-  if [[ -d "$APP" && -n "${SUDO_USER:-}" && "${SUDO_USER}" != root ]]; then
-    sudo -u "$SUDO_USER" open "$APP" 2>/dev/null || true
-  fi
-  [[ -d "$APP" ]] && say "Menu bar app: $APP (add it under System Settings > General > Login Items to start at login)"
+  [[ -d "$APP" ]] && say "Menu bar app: $APP (Setup Assistant can also make it start at login)"
 }
 
 cmd_enable_sudo() {
   need_root
   [[ -S "$SOCK" ]] || die "yoga-fp is not installed/running"
-  local user="${SUDO_USER:-}"; [[ -n "$user" && "$user" != root ]] || die "run as: sudo $0 enable-sudo (from your user account)"
+  local user; user="$(target_user)"
   sudo -u "$user" "$BIN" status | grep -q '"enrolled": true' || die "$user has no enrolled fingerprint; run: sudo yogafp grant-enroll && yogafp enroll"
   [[ -f "$PAMMOD" ]] || die "PAM module missing"
 
@@ -312,13 +352,17 @@ EOF
 }
 
 install_authplugin() {
-  command -v cc >/dev/null || die "a C compiler is required (xcode-select --install)"
-  local b; b="$(mktemp -d)"; cp "$HERE/authplugin/"* "$b/"
-  make -s -C "$b" >/dev/null || { rm -rf "$b"; die "building the authorization plugin failed"; }
-  rm -rf "$AUTHPLUGIN"; cp -R "$b/YogaFPAuth.bundle" "$AUTHPLUGIN"
+  if [[ -d "$PREFIX/YogaFPAuth.bundle" ]]; then             # installed copy (package installs: no compiler needed)
+    rm -rf "$AUTHPLUGIN"; ditto "$PREFIX/YogaFPAuth.bundle" "$AUTHPLUGIN"
+  else
+    command -v cc >/dev/null || die "a C compiler is required (xcode-select --install)"
+    local b; b="$(mktemp -d)"; cp "$HERE/authplugin/"* "$b/"
+    make -s -C "$b" >/dev/null || { rm -rf "$b"; die "building the authorization plugin failed"; }
+    rm -rf "$AUTHPLUGIN"; cp -R "$b/YogaFPAuth.bundle" "$AUTHPLUGIN"
+    install -m 755 -o root -g wheel "$b/authtest" "$SELFCHECK"
+    rm -rf "$b"
+  fi
   chown -R root:wheel "$AUTHPLUGIN"; chmod -R go-w "$AUTHPLUGIN"
-  install -m 755 -o root -g wheel "$b/authtest" "$SELFCHECK"
-  rm -rf "$b"
 }
 
 AUTHLOG=/var/log/yogafp-auth.log
@@ -330,7 +374,7 @@ authlog_since() {   # $1 = byte offset -> new lines of the root step's log
 cmd_admin_test() {
   need_root
   [[ -S "$SOCK" ]] || die "yoga-fp is not installed/running"
-  local user="${SUDO_USER:-}"; [[ -n "$user" && "$user" != root ]] || die "run as: sudo $0 admin-test (from your user account)"
+  local user; user="$(target_user)"
   sudo -u "$user" "$BIN" status | grep -q '"enrolled": true' || die "$user has no enrolled fingerprint"
   say "Installing the authorization plugin: $AUTHPLUGIN"
   install_authplugin
@@ -386,7 +430,7 @@ cmd_enable_admin() {
   need_root
   [[ -f "$DATA/admin-test-passed" ]] || die "run 'sudo $0 admin-test' first (it must pass)"
   [[ -d "$AUTHPLUGIN" ]] || die "plugin missing; run admin-test again"
-  local user="${SUDO_USER:-}"; [[ -n "$user" && "$user" != root ]] || die "run as: sudo $0 enable-admin (from your user account)"
+  local user; user="$(target_user)"
   mkdir -p "$AUTHDB_BACKUP"; chmod 700 "$AUTHDB_BACKUP"
   local r shared timeout
   for r in "${ADMIN_RIGHTS[@]}"; do
@@ -452,6 +496,7 @@ while [[ $# -gt 0 ]]; do
     --fwext) FWEXT="$2"; shift 2 ;;
     --lenovo-exe) LENOVO_EXE="$2"; shift 2 ;;
     --purge) PURGE=--purge; shift ;;
+    --user) OPT_USER="$2"; shift 2 ;;
     *) die "unknown option $1" ;;
   esac
 done

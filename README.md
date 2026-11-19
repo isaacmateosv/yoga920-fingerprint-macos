@@ -204,5 +204,7 @@ the daemon and files. `--purge` also deletes all fingerprint data and the encryp
 
 ## Credits & licenses
 
+* **yoga-fp was created by [isaacmateosv](https://github.com/isaacmateosv)** — MIT License (`LICENSE`).
+
 * python-validity © uunicorn, MIT (`vendor/LICENSE.python-validity`); 0081 support follows PR #294 (gocarlos).
 * Synaptics/Lenovo firmware is not included; the installer verifies the SHA-512 of the official package.
