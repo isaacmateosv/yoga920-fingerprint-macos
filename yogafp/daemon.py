@@ -30,6 +30,7 @@ VERSION = '0.1.0'
 
 GRANT_SECONDS = 300
 FAIL_WINDOW, FAIL_MAX, LOCKOUT = 120, 5, 60
+PASSWORD_MAX_AGE = 48 * 3600     # like Touch ID: fingerprint needs a password within the last 48 h
 
 log = logging.getLogger('yogafpd')
 
@@ -61,6 +62,8 @@ class Daemon:
         self.wlock = threading.Lock()
         self.auth = None           # running PAM verify: {'uid', 'service', 'cancel': Event}
         self._mosaics = {}         # uid -> (template mtime, clusters)
+        self.password_at = {}      # uid -> last successful password authentication (sudo / admin dialog)
+        self.password_required = set()   # uids that must use their password once (e.g. after 5 failures)
         self.matches = {}          # one-time nonce -> (uid, time): proof of a real match for the auth plugin
         self.mlock = threading.Lock()
 
@@ -144,6 +147,36 @@ class Daemon:
     def rate_limited(self, uid):
         return time.time() < self.locked_until.get(uid, 0)
 
+    # ------------------------------------------------------------ password policy (as Touch ID does)
+    def now(self):
+        return time.time()
+
+    def login_time(self, uid):
+        """When uid took ownership of the console = when they logged in with their password (FileVault: no
+        auto-login). After a restart this is the first password of the boot."""
+        try:
+            st = os.stat('/dev/console')
+            return st.st_ctime if st.st_uid == uid else 0
+        except OSError:
+            return 0
+
+    def last_password(self, uid):
+        return max(self.password_at.get(uid, 0), self.login_time(uid))
+
+    def policy_block(self, uid):
+        """Reason the fingerprint may not be used right now, or None."""
+        if uid in self.password_required:
+            return 'password required after too many failed fingerprint attempts'
+        if self.now() - self.last_password(uid) > PASSWORD_MAX_AGE:
+            return 'password required (not used in the last 48 hours)'
+        return None
+
+    def note_password(self, uid):
+        self.password_at[uid] = self.now()
+        self.password_required.discard(uid)
+        self.fails.pop(uid, None)
+        self.locked_until.pop(uid, None)
+
     def note_result(self, uid, ok):
         if ok:
             self.fails.pop(uid, None)
@@ -154,6 +187,7 @@ class Daemon:
         if len(f) >= FAIL_MAX:
             self.locked_until[uid] = now + LOCKOUT
             self.fails[uid] = []
+            self.password_required.add(uid)
             log.warning('uid %d locked out for %ds after %d failed verifies', uid, LOCKOUT, FAIL_MAX)
 
     def adapt(self, uid, ft, score_):
@@ -171,6 +205,10 @@ class Daemon:
             log.warning('template adaptation skipped: %s', e)
 
     def do_verify(self, uid, cap, tries, timeout, learn=True):
+        block = self.policy_block(uid)
+        if block:
+            log.info('verify uid=%d refused: %s', uid, block)
+            raise core.FPError(block)
         if self.rate_limited(uid):
             raise core.FPError('too many failed attempts; try again in a minute')
         samples = self.store.load(uid)
@@ -193,7 +231,7 @@ class Daemon:
                     self.adapt(uid, ft, best)
                 return True, 'match'
             cap.emit({'event': 'nomatch', 'msg': 'Not recognized - try again'})
-            if self.rate_limited(uid):
+            if self.rate_limited(uid) or uid in self.password_required:
                 return False, 'locked'
             cap.wait_lift()
         return False, 'nomatch'
@@ -209,7 +247,7 @@ class Daemon:
         if op == 'status':
             s = self.sensor
             return {'version': VERSION, 'uid': uid, 'enrolled': self.store.enrolled(uid), 'threshold': self.threshold(),
-                    'method': self.method(),
+                    'method': self.method(), 'password_needed': self.policy_block(uid),
                     'sensor_present': (s.present() if s else None), 'sensor_ready': bool(s and s.ready),
                     'grant': self.grants.get(uid, 0) > time.time()}
 
@@ -256,6 +294,13 @@ class Daemon:
             os.replace(tmp, self.config_path())
             log.info('config set: %s', cfg)
             return cfg
+
+        if op == 'password_ok':        # root only: PAM / auth plugin report a successful password authentication
+            if not is_root:
+                raise core.FPError('root only')
+            self.note_password(uid)
+            log.info('password authentication recorded for uid=%d', uid)
+            return {'recorded': True}
 
         if op == 'consume_match':      # the auth plugin's root step: was there a real match for this nonce+uid?
             if not is_root:

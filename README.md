@@ -105,7 +105,9 @@ Tuning: `sudo yogafp set-threshold N` (default 10). Other commands: `sudo ./inst
   existing enrollment, a matching enrolled finger. Someone at your unlocked Mac cannot add their finger.
 * **No remote approval:** the PAM module ignores SSH sessions, so a remote login can't trigger a prompt that a
   person at the machine approves.
-* **Rate limiting:** 5 failed verifies in 2 minutes lock that user out of fingerprint auth for 60 s.
+* **Password rules, as Touch ID:** the fingerprint only works if you used your password in the last 48 hours
+  (your login after a restart counts, as do password `sudo` and password approvals in admin dialogs), and
+  5 failed fingerprint attempts require the password once. `yogafp status` shows when a password is needed.
 * **Fallback:** 3 tries, then your password. A missing daemon or sensor falls through to the password.
 
 ### Known limitations (read before enabling sudo)

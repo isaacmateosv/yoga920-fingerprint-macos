@@ -79,6 +79,24 @@ static int is_remote(pam_handle_t *pamh) {
     return e && *e;
 }
 
+/* Tell yogafpd (peer must be root) that uid just authenticated with a password: Touch ID-style policy
+   (fingerprint requires a password within 48 h / after 5 failures). Best effort, never blocks auth. */
+static void report_password(uid_t uid) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return;
+    struct sockaddr_un sa; memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX; strlcpy(sa.sun_path, SOCK_PATH, sizeof sa.sun_path);
+    uid_t pe; gid_t pg;
+    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0 && getpeereid(fd, &pe, &pg) == 0 && pe == 0) {
+        struct timeval tv = { 3, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        char req[96];
+        int n = snprintf(req, sizeof req, "{\"op\": \"password_ok\", \"uid\": %u}\n", (unsigned)uid);
+        if (write(fd, req, (size_t)n) == n) { char buf[256]; (void)read(fd, buf, sizeof buf); }
+    }
+    close(fd);
+}
+
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
     (void)flags;
     int debug = has_opt(argc, argv, "debug");
@@ -152,7 +170,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
                 result = PAM_AUTH_ERR;          /* touched but not recognized / timed out */
             } else {
                 /* daemon error: not enrolled, sensor unavailable, locked out ... -> password */
-                if (json_str(line, "error", msg, sizeof msg) && (debug || strstr(msg, "too many") || strstr(msg, "cancelled")))
+                if (json_str(line, "error", msg, sizeof msg) && (debug || strstr(msg, "too many") || strstr(msg, "cancelled") || strstr(msg, "password required")))
                     info(pamh, msg);
                 result = PAM_IGNORE;
             }
@@ -166,12 +184,22 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
     fclose(f);
 
+    if (result == PAM_SUCCESS) pam_set_data(pamh, "yogafp_fingerprint", (void *)1, NULL);
     syslog(LOG_AUTH | LOG_NOTICE, "pam_yogafp: user %s: %s", user,
            result == PAM_SUCCESS ? "fingerprint accepted" : result == PAM_AUTH_ERR ? "fingerprint rejected" : "skipped");
     return result;
 }
 
 PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    (void)pamh; (void)flags; (void)argc; (void)argv;
+    (void)argc; (void)argv;
+    if (flags & (PAM_ESTABLISH_CRED | PAM_REINITIALIZE_CRED)) {
+        const void *fp = NULL;
+        if (pam_get_data(pamh, "yogafp_fingerprint", &fp) != PAM_SUCCESS || !fp) {
+            const char *user = NULL;
+            struct passwd *pw;
+            if (pam_get_user(pamh, &user, NULL) == PAM_SUCCESS && user && (pw = getpwnam(user)))
+                report_password(pw->pw_uid);
+        }
+    }
     return PAM_SUCCESS;
 }

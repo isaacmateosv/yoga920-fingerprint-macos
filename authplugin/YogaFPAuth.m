@@ -323,6 +323,7 @@ static void invoke_grant(Mech *m) {
             NSString *pw = ctx_string(m, CTX_PASS);
             ok = pw.length && od_password_ok(user, pw);
             logline(@"grant: password for %@ -> %@", user, ok ? @"accepted" : @"rejected");
+            if (ok) daemon_call_once(@{@"op": @"password_ok", @"uid": @(p->pw_uid)}, 3);   // Touch ID-style policy
         } else {
             logline(@"grant: no method in context -> rejected");
         }

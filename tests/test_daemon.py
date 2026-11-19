@@ -81,6 +81,7 @@ def run():
     store = core.Store(tmp, system_keychain=False)
     fs = FakeSensor()
     d = daemon.Daemon(store=store, sensor=fs)
+    d.login_time = lambda uid: time.time()          # pretend the user just logged in with their password
     core.REGIONS[:] = SMALL_REGIONS
     me = os.getuid()
     events = []
@@ -114,7 +115,7 @@ def run():
 
     r = call({'op': 'enroll', }, me)          # no grant left, no finger -> must not succeed
     check('grant is single-use (re-enroll needs finger confirm)', not r['ok'])
-    d.locked_until.clear(); d.fails.clear()
+    d.locked_until.clear(); d.fails.clear(); d.password_required.clear()
 
     fs.touch(A, 7, 3, 2)
     r = call({'op': 'verify'}, me)
@@ -137,7 +138,7 @@ def run():
     check('5 failures in window -> locked out', d.rate_limited(me))
     r = call({'op': 'verify', 'uid': me}, 0)
     check('locked-out uid is refused', not r['ok'] and 'too many' in r['error'])
-    d.locked_until.clear(); d.fails.clear(); fs.queue.clear()
+    d.locked_until.clear(); d.fails.clear(); d.password_required.clear(); fs.queue.clear()
 
     # PAM-style verify (root, service=sudo) mirrored to the user's watcher; user may cancel
     import threading as _th
@@ -166,7 +167,7 @@ def run():
     check('another user cannot cancel', r_other['ok'] and not r_other['cancelled'])
     check('user cancel ends sudo verify -> password (%s)' % res.get('error'), not res.get('ok') and 'password' in res.get('error', ''))
     stop['v'] = True; w1.join(2); w2.join(2)
-    d.locked_until.clear(); d.fails.clear()
+    d.locked_until.clear(); d.fails.clear(); d.password_required.clear()
 
     # threshold config: root only, bounded, read live
     r = call({'op': 'set_threshold', 'threshold': 20}, me)
@@ -185,7 +186,7 @@ def run():
     check('default threshold when no config', call({'op': 'status'}, me)['threshold'] == core.THRESHOLD)
 
     # adaptive enrollment (thresholds scaled for synthetic patterns)
-    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; d.locked_until.clear(); d.fails.clear()
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; d.locked_until.clear(); d.fails.clear(); d.password_required.clear()
     s0, ne0 = store.load_full(me)
     saved = (core.ADAPT_FACTOR, core.ADAPT_NOVEL_MAX, core.ADAPT_MAX_LEARNED)
     core.ADAPT_FACTOR, core.ADAPT_NOVEL_MAX, core.ADAPT_MAX_LEARNED = 1.0, 10.0, 2
@@ -197,7 +198,7 @@ def run():
     fs.touch(B, 0, 0, 0); fs.touch(B, 4, 4, 0); fs.touch(B, -4, 3, 0)
     call({'op': 'verify'}, me)
     check('other finger never teaches the template', len(store.load(me)) == len(s1))
-    d.locked_until.clear(); d.fails.clear()
+    d.locked_until.clear(); d.fails.clear(); d.password_required.clear()
     fs.touch(A, -7, 6, -3)
     call({'op': 'test', 'tries': 1}, me)
     check('test runs never teach the template', len(store.load(me)) == len(s1))
@@ -222,7 +223,7 @@ def run():
     os.remove(store.path(other))
 
     # one-time match proofs for the authorization plugin (nonce)
-    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; d.locked_until.clear(); d.fails.clear()
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; d.locked_until.clear(); d.fails.clear(); d.password_required.clear()
     nonce = os.urandom(16).hex()
     fs.touch(A, 6, -2, 2)
     r = call({'op': 'verify', 'nonce': nonce}, me)
@@ -246,7 +247,38 @@ def run():
     fs.touch(B, 0, 0, 0); fs.touch(B, 4, 4, 0); fs.touch(B, -4, 3, 0); n4 = os.urandom(16).hex()
     call({'op': 'verify', 'nonce': n4}, me)
     check('no proof is recorded for a failed verify', n4 not in d.matches)
-    d.locked_until.clear(); d.fails.clear(); fs.queue.clear()
+    d.locked_until.clear(); d.fails.clear(); d.password_required.clear(); fs.queue.clear()
+
+    # password policy, as Touch ID: 48 h without a password, or 5 failures -> password required once
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0
+    real_login = d.login_time
+    d.login_time = lambda uid: time.time() - 49 * 3600
+    d.password_at.pop(me, None)
+    fs.touch(A, 6, -2, 2)
+    r = call({'op': 'verify'}, me)
+    check('fingerprint refused after 48 h without a password', not r['ok'] and '48 hours' in r['error'])
+    r = call({'op': 'password_ok'}, me)
+    check('a user cannot claim a password authentication', not r['ok'])
+    r = call({'op': 'password_ok', 'uid': me}, 0)
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; fs.touch(A, 6, -2, 2)
+    r2 = call({'op': 'verify'}, me)
+    check('a recorded password re-enables the fingerprint (%s)' % r2.get('reason', r2.get('error')), r['ok'] and r2.get('match'))
+    d.login_time = real_login
+    st = call({'op': 'status'}, me)
+    check('status reports no password needed', st['password_needed'] is None)
+    for _ in range(4):                               # fresh impostor touches per attempt until 5 failures
+        if me in d.password_required:
+            break
+        fs.queue.clear(); fs.frames_left = 0; fs.gap = 0
+        for _ in range(3): fs.touch(B, 0, 0, 0)
+        call({'op': 'verify', 'tries': 3, 'timeout': 3}, me); d.locked_until.clear()
+    check('5 failed attempts require the password', me in d.password_required)
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; fs.touch(A, 6, -2, 2)
+    r = call({'op': 'verify'}, me)
+    check('...even for the right finger, until the password is used', not r['ok'] and 'failed fingerprint' in r['error'])
+    call({'op': 'password_ok', 'uid': me}, 0)
+    check('password clears the requirement', me not in d.password_required)
+    fs.queue.clear(); d.locked_until.clear(); d.fails.clear()
 
     # cross-uid template swap must fail authentication
     other = me + 1
@@ -269,7 +301,7 @@ def run():
     fs.touch(B, 0, 0, 0); fs.touch(B, 3, 3, 0); fs.touch(B, -3, 2, 0)
     r = call({'op': 'delete'}, me)
     check('user delete refused without matching finger (%s, enrolled=%s)' % (r, store.enrolled(me)), not r['ok'] and store.enrolled(me))
-    d.locked_until.clear(); d.fails.clear(); fs.queue.clear()
+    d.locked_until.clear(); d.fails.clear(); d.password_required.clear(); fs.queue.clear()
     fs.touch(A, 4, -6, 3)
     r = call({'op': 'delete'}, me)
     check('user delete allowed after matching finger (%s)' % r, r['ok'] and not store.enrolled(me))
