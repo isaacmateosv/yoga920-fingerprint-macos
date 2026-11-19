@@ -16,7 +16,7 @@ Authorization (caller identity comes from the kernel via LOCAL_PEERCRED, never f
                               (cancel only ever denies; it can never approve)
 Failed verifies are rate limited per uid.
 """
-import os, sys, json, time, socket, struct, threading, logging, signal
+import os, re, sys, json, time, socket, struct, threading, logging, signal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))                                  # yogafp package
@@ -61,6 +61,19 @@ class Daemon:
         self.wlock = threading.Lock()
         self.auth = None           # running PAM verify: {'uid', 'service', 'cancel': Event}
         self._mosaics = {}         # uid -> (template mtime, clusters)
+        self.matches = {}          # one-time nonce -> (uid, time): proof of a real match for the auth plugin
+        self.mlock = threading.Lock()
+
+    MATCH_TTL = 60
+
+    def record_match(self, nonce, uid):
+        if not nonce:
+            return
+        with self.mlock:
+            now = time.time()
+            for k in [k for k, (_, t) in self.matches.items() if now - t > self.MATCH_TTL]:
+                del self.matches[k]
+            self.matches[nonce] = (uid, now)
 
     def broadcast(self, uid, obj):
         with self.wlock:
@@ -244,6 +257,16 @@ class Daemon:
             log.info('config set: %s', cfg)
             return cfg
 
+        if op == 'consume_match':      # the auth plugin's root step: was there a real match for this nonce+uid?
+            if not is_root:
+                raise core.FPError('root only')
+            nonce = str(req.get('nonce', ''))
+            with self.mlock:
+                entry = self.matches.pop(nonce, None)
+            ok = bool(entry and entry[0] == uid and time.time() - entry[1] <= self.MATCH_TTL)
+            log.info('consume_match uid=%d %s', uid, 'ok' if ok else 'rejected')
+            return {'valid': ok}
+
         if op == 'grant_enroll':
             if not is_root:
                 raise core.FPError('root only')
@@ -269,8 +292,13 @@ class Daemon:
             if op == 'verify':
                 tries, tmo = int(req.get('tries', 3)), float(req.get('timeout', 10))
                 service = str(req.get('service', ''))[:32] if is_root else ''
+                nonce = str(req.get('nonce', ''))
+                if nonce and not re.fullmatch(r'[0-9a-f]{32,64}', nonce):
+                    raise core.FPError('bad nonce')
                 if not service:
                     ok, why = self.do_verify(uid, cap, tries, tmo)
+                    if ok:
+                        self.record_match(nonce, uid)
                     return {'match': ok, 'reason': why}
                 # PAM authentication (e.g. sudo): mirror progress to the user's menu bar app, allow cancel.
                 cancel = threading.Event()
@@ -286,6 +314,8 @@ class Daemon:
                 try:
                     ok, why = self.do_verify(uid, cap2, tries, tmo)
                     result = 'match' if ok else why
+                    if ok:
+                        self.record_match(nonce, uid)
                     return {'match': ok, 'reason': why}
                 except core.FPError as e:
                     result = 'cancelled' if cancel.is_set() else 'error'

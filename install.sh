@@ -247,14 +247,14 @@ right_def() {   # $1 = shared (true/false), $2 = timeout seconds -> evaluate-mec
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>class</key><string>evaluate-mechanisms</string>
-  <key>comment</key><string>yoga-fp: fingerprint, then password. Restore with: sudo ./install.sh disable-admin</string>
+  <key>comment</key><string>yoga-fp: one dialog, fingerprint or password; root step decides. Restore: sudo ./install.sh disable-admin</string>
   <key>mechanisms</key><array>
-    <string>YogaFPAuth:fingerprint,privileged</string>
-    <string>YogaFPAuth:password</string>
+    <string>YogaFPAuth:ui</string>
+    <string>YogaFPAuth:grant,privileged</string>
   </array>
   <key>shared</key><$1/>
   <key>timeout</key><integer>$2</integer>
-  <key>tries</key><integer>10000</integer>
+  <key>tries</key><integer>3</integer>
   <key>version</key><integer>1</integer>
 </dict></plist>
 EOF
@@ -270,8 +270,10 @@ install_authplugin() {
   rm -rf "$b"
 }
 
-plugin_log_since() {   # $1 = start timestamp -> plugin log lines since then
-  log show --start "$1" --style compact --predicate 'subsystem == "com.yogafp.authplugin"' 2>/dev/null | grep -v '^Timestamp' || true
+AUTHLOG=/var/log/yogafp-auth.log
+
+authlog_since() {   # $1 = byte offset -> new lines of the root step's log
+  [[ -f "$AUTHLOG" ]] && tail -c +$(( $1 + 1 )) "$AUTHLOG" || true
 }
 
 cmd_admin_test() {
@@ -283,33 +285,33 @@ cmd_admin_test() {
   install_authplugin
   right_def false 0 | security authorizationdb write "$TEST_RIGHT" >/dev/null 2>&1 || die "could not create the test right"
   local def; def="$(security authorizationdb read "$TEST_RIGHT" 2>/dev/null | grep -c 'YogaFPAuth:' || true)"
-  [[ "$def" == 2 ]] || { security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1; die "test right was not stored as expected (found $def YogaFPAuth mechanisms)"; }
-  say "Test right $TEST_RIGHT created and verified (2 YogaFPAuth mechanisms)."
+  [[ "$def" == 2 ]] || { security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1; die "test right was not stored as expected"; }
+  say "Test right $TEST_RIGHT created and verified."
+  touch "$AUTHLOG"; chmod 600 "$AUTHLOG"
 
-  local t1 r1 l1 t2 r2 l2
-  t1="$(date '+%Y-%m-%d %H:%M:%S')"
-  say "Test 1/2: TOUCH THE SENSOR when the YogaFP panel appears (do not type a password)."
-  r1="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"; sleep 2
-  l1="$(plugin_log_since "$t1")"
-  echo "    result: $r1"; echo "$l1" | sed -n 's/.*auth\] /    plugin: /p' | tail -5
-  t2="$(date '+%Y-%m-%d %H:%M:%S')"
-  say "Test 2/2: press 'Use Password' in the YogaFP panel, then type your password in the dialog."
-  r2="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"; sleep 2
-  l2="$(plugin_log_since "$t2")"
-  echo "    result: $r2"; echo "$l2" | sed -n 's/.*auth\] /    plugin: /p' | tail -5
+  local o1 r1 l1 o2 r2 l2
+  o1=$(stat -f %z "$AUTHLOG")
+  say "Test 1/2: one dialog appears. TOUCH THE SENSOR (do not type anything)."
+  r1="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"
+  l1="$(authlog_since "$o1")"; echo "    result: $r1"; sed 's/^/    root step: /' <<<"$l1" | tail -3
+  o2=$(stat -f %z "$AUTHLOG")
+  say "Test 2/2: the dialog appears again. TYPE YOUR PASSWORD and press OK (do not touch the sensor)."
+  r2="$(sudo -u "$user" "$PREFIX/authtest" "$TEST_RIGHT" 2>&1 || true)"
+  l2="$(authlog_since "$o2")"; echo "    result: $r2"; sed 's/^/    root step: /' <<<"$l2" | tail -3
   security authorizationdb remove "$TEST_RIGHT" >/dev/null 2>&1 || true
 
   local ok1=no ok2=no
-  [[ "$r1" == granted ]] && grep -q "fingerprint verified" <<<"$l1" && ok1=yes
-  [[ "$r2" == granted ]] && grep -q "password accepted" <<<"$l2" && ok2=yes
+  [[ "$r1" == granted ]] && grep -q "grant: fingerprint for .* accepted" <<<"$l1" && ok1=yes
+  [[ "$r2" == granted ]] && grep -q "grant: password for .* accepted" <<<"$l2" && ok2=yes
   if [[ $ok1 == yes && $ok2 == yes ]]; then
     date > "$DATA/admin-test-passed"; chmod 600 "$DATA/admin-test-passed"
-    say "PASS: fingerprint path and password path both went through the plugin."
+    say "PASS: the root step approved test 1 by fingerprint and test 2 by password."
     say "Real admin dialogs are unchanged; enable them with: sudo $0 enable-admin"
   else
     rm -f "$DATA/admin-test-passed"
-    warn "not passed (fingerprint path: $ok1, password path: $ok2). Nothing system-wide was changed."
-    grep -q "plugin loaded\|invoked" <<<"$l1$l2" || warn "the plugin never ran: macOS did not load it for the test right"
+    warn "not passed (fingerprint: $ok1, password: $ok2). Nothing system-wide was changed."
+    [[ -n "$l1$l2" ]] || warn "the root step never ran (see ~/Library/Logs/yogafp-auth.log for the dialog side)"
+    warn "a 'granted' without a root-step line means macOS answered from a cached authorization; wait 5 minutes and retry"
     exit 1
   fi
 }
@@ -350,8 +352,9 @@ cmd_enable_admin() {
     right_def "$shared" "$timeout" | security authorizationdb write "$r" >/dev/null 2>&1 || { cmd_disable_admin; die "writing $r failed; restored"; }
   done
   say "Self-check: an admin request appears now - touch the sensor (or use your password)."
+  touch "$AUTHLOG"; local off; off=$(stat -f %z "$AUTHLOG")
   local res; res="$(sudo -u "$user" "$PREFIX/authtest" system.privilege.admin 2>&1 || true)"; echo "    -> $res"
-  if [[ "$res" != granted ]]; then
+  if [[ "$res" != granted ]] || ! authlog_since "$off" | grep -q "grant: .* accepted"; then
     warn "self-check failed ($res); restoring the original definitions"
     cmd_disable_admin
     exit 1

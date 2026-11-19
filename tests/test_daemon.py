@@ -59,7 +59,14 @@ class FakeSensor:
         return self.base + self.cur + noise
 
 
-A, B = pattern(7), pattern(99)
+def other_texture(seed, N=400):
+    """Impostor: a smooth random ridge-like texture unrelated to pattern() (a different 'finger')."""
+    r = np.random.default_rng(seed)
+    f = cv2.GaussianBlur(r.normal(0, 1, (N, N)).astype(np.float32), (0, 0), 3.0)
+    return 28.0 * f / (f.std() + 1e-6)          # same contrast as pattern() (std ~28)
+
+
+A, B = pattern(7), other_texture(99)
 ENROLL_POSES = [(0, 0, 0), (15, 0, 5), (-15, 5, -5), (0, 15, 8), (5, -15, -8), (20, 20, 0),
                 (-20, -10, 3), (10, -5, -3), (8, 8, 2), (-8, 8, -2)]
 SMALL_REGIONS = [('center', 'c', 5), ('upper_right', 'ur', 5)]
@@ -213,6 +220,33 @@ def run():
     ls, lne = store.load_full(other)
     check('legacy template (no n_enrolled) loads', len(ls) == 1 and lne == 1)
     os.remove(store.path(other))
+
+    # one-time match proofs for the authorization plugin (nonce)
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0; d.locked_until.clear(); d.fails.clear()
+    nonce = os.urandom(16).hex()
+    fs.touch(A, 6, -2, 2)
+    r = call({'op': 'verify', 'nonce': nonce}, me)
+    check('user verify with nonce matches (%s)' % r.get('reason'), r['ok'] and r['match'])
+    r = call({'op': 'consume_match', 'nonce': nonce, 'uid': me}, me)
+    check('non-root cannot consume a match proof', not r['ok'])
+    r = call({'op': 'consume_match', 'nonce': nonce, 'uid': me + 1}, 0)
+    check('match proof for the wrong uid is rejected', r['ok'] and not r['valid'])
+    fs.queue.clear(); fs.frames_left = 0; fs.gap = 0
+    fs.touch(A, 6, -2, 2); n2 = os.urandom(16).hex()
+    rv = call({'op': 'verify', 'nonce': n2}, me)
+    r = call({'op': 'consume_match', 'nonce': n2, 'uid': me}, 0)
+    check('root consumes a real match proof once (verify: %s)' % rv.get('reason'), rv.get('match') and r['ok'] and r['valid'])
+    r = call({'op': 'consume_match', 'nonce': n2, 'uid': me}, 0)
+    check('a match proof cannot be reused', r['ok'] and not r['valid'])
+    n3 = os.urandom(16).hex(); d.record_match(n3, me); d.matches[n3] = (me, time.time() - 120)
+    r = call({'op': 'consume_match', 'nonce': n3, 'uid': me}, 0)
+    check('an expired match proof is rejected', r['ok'] and not r['valid'])
+    r = call({'op': 'verify', 'nonce': 'not-hex!'}, me)
+    check('malformed nonce is refused', not r['ok'])
+    fs.touch(B, 0, 0, 0); fs.touch(B, 4, 4, 0); fs.touch(B, -4, 3, 0); n4 = os.urandom(16).hex()
+    call({'op': 'verify', 'nonce': n4}, me)
+    check('no proof is recorded for a failed verify', n4 not in d.matches)
+    d.locked_until.clear(); d.fails.clear(); fs.queue.clear()
 
     # cross-uid template swap must fail authentication
     other = me + 1

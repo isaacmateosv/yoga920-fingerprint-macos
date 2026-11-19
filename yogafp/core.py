@@ -396,6 +396,7 @@ class Capture:
                     os.replace(tmp, self.ref_path)
                 return
             if touched and not warned:
+                log.info('finger already on the sensor at start; waiting for it to lift')
                 self.emit({'event': 'lift', 'msg': 'Lift your finger off the sensor first'})
                 warned = True
             time.sleep(0.25)
@@ -444,8 +445,12 @@ class Capture:
                 ft = features(diff)
                 if ft is not None:
                     return ft
+                log.info('touch skipped: too few features (coverage %.2f)', cov)    # numbers only
+            else:
+                log.info('touch skipped: partial, coverage %.2f < %.2f', cov, MIN_COVERAGE)
             self.emit({'event': 'partial', 'coverage': round(cov, 2), 'msg': 'Partial touch - press flatter'})
             self.wait_lift()
+        log.info('no usable touch within %.0fs', timeout)
         return None
 
     def enroll(self, samples=None, regions=REGIONS):
