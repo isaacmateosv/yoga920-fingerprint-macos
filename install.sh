@@ -127,6 +127,11 @@ exec "$PREFIX/venv/bin/python" -I "$PREFIX/yogafp/cli.py" "\$@"
 EOF
   chmod 755 "$BIN"; chown root:wheel "$BIN"
 
+  if [[ -d "$AUTHPLUGIN" ]]; then          # admin-dialog plugin already in use: refresh it with this version
+    say "Authorization plugin: updating $AUTHPLUGIN"
+    install_authplugin
+  fi
+
   if command -v swiftc >/dev/null; then
     say "Menu bar app: $APP"
     local abuild; abuild="$(mktemp -d)"; cp "$HERE/app/YogaFP.swift" "$HERE/app/build.sh" "$abuild/"
