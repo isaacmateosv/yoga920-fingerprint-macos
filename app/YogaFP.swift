@@ -637,6 +637,58 @@ final class SetupWindow {
 
 let repoURL = URL(string: "https://github.com/isaacmateosv/yoga920-fingerprint-macos")!
 
+/// On-demand update check against the project's public GitHub releases. No background checks, no personal data:
+/// one anonymous HTTPS request with a generic User-Agent. The download page opens in the browser; nothing is
+/// installed automatically (you see the release notes and published checksums before running the package).
+enum Updates {
+    static var current: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0" }
+
+    static func newer(_ a: String, than b: String) -> Bool {
+        let pa = a.split(separator: ".").map { Int($0) ?? 0 }, pb = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(pa.count, pb.count) {
+            let x = i < pa.count ? pa[i] : 0, y = i < pb.count ? pb[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    @MainActor static func check() {
+        var req = URLRequest(url: URL(string: "https://api.github.com/repos/isaacmateosv/yoga920-fingerprint-macos/releases/latest")!)
+        req.setValue("YogaFP/\(current)", forHTTPHeaderField: "User-Agent")
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 15
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            DispatchQueue.main.async {
+                let a = NSAlert()
+                if let err {
+                    a.messageText = "Could not check for updates"; a.informativeText = err.localizedDescription
+                } else if code == 404 {
+                    a.messageText = "No releases published yet"; a.informativeText = "You have YogaFP \(current)."
+                } else if let tag = json?["tag_name"] as? String {
+                    let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+                    if newer(latest, than: current) {
+                        a.messageText = "YogaFP \(latest) is available"
+                        let notes = (json?["body"] as? String ?? "").prefix(600)
+                        a.informativeText = "You have \(current).\n\n\(notes)"
+                        a.addButton(withTitle: "Open Download Page"); a.addButton(withTitle: "Later")
+                        NSApp.activate(ignoringOtherApps: true)
+                        if a.runModal() == .alertFirstButtonReturn,
+                           let page = (json?["html_url"] as? String).flatMap(URL.init(string:)) { NSWorkspace.shared.open(page) }
+                        return
+                    }
+                    a.messageText = "YogaFP is up to date"; a.informativeText = "Version \(current) is the latest."
+                } else {
+                    a.messageText = "Could not check for updates"; a.informativeText = "Unexpected reply from GitHub (HTTP \(code))."
+                }
+                NSApp.activate(ignoringOtherApps: true)
+                a.runModal()
+            }
+        }.resume()
+    }
+}
+
 struct AboutView: View {
     @ObservedObject var m: Model
     var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?" }
@@ -701,6 +753,7 @@ struct MenuContent: View {
         Divider()
         Button("Setup Assistant…") { SetupWindow.show(m) }
         Button("Refresh") { m.refresh() }
+        Button("Check for Updates…") { Updates.check() }
         Button("About YogaFP") { m.refresh(); AboutWindow.show(m) }
         Divider()
         Button("Quit YogaFP") { NSApp.terminate(nil) }.keyboardShortcut("q")

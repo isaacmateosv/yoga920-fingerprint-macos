@@ -107,6 +107,9 @@ mostly read-only investigation before anything was written to the sensor.
 README). Everything is prebuilt and a private Python runtime with all dependencies is bundled, so the target Mac
 needs **no Xcode, Python or internet** (Intel Macs, macOS 14+). The package is unsigned: right-click → Open.
 
+**Updates:** the menu bar's *Check for Updates…* asks GitHub's public releases API (only when you click; one
+anonymous request) and opens the download page if a newer version exists. Nothing installs automatically.
+
 After installing, the **YogaFP Setup Assistant** opens from the menu bar icon: enroll your finger, turn on sudo,
 turn on admin dialogs (private test first), start at login. Each step uses the standard admin prompt.
 
