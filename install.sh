@@ -180,7 +180,7 @@ EOF
 
   if command -v swiftc >/dev/null; then
     say "Menu bar app: $APP"
-    local abuild; abuild="$(mktemp -d)"; cp "$HERE/app/YogaFP.swift" "$HERE/app/build.sh" "$abuild/"
+    local abuild; abuild="$(mktemp -d)"; cp "$HERE/app/YogaFP.swift" "$HERE/app/build.sh" "$HERE/app/make_icon.swift" "$abuild/"
     if bash "$abuild/build.sh" >/dev/null 2>&1; then
       pkill -x YogaFP 2>/dev/null || true
       rm -rf "$APP"; cp -R "$abuild/build/YogaFP.app" "$APP"; chown -R root:admin "$APP"; chmod -R go-w "$APP"
