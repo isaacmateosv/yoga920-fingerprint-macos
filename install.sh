@@ -333,13 +333,19 @@ cmd_update() {   # upgrade Python dependencies to the newest stable releases in 
 }
 
 # ---------------------------------------------------------------- admin dialogs (authorization plugin)
-right_def() {   # $1 = shared (true/false), $2 = timeout seconds -> evaluate-mechanisms right using YogaFP
+MECH_COMMENT='yoga-fp: fingerprint or password in one dialog, root step decides; otherwise the original Apple definition. Restore with yogafp-admin.sh disable-admin'
+
+right_def() {   # $1 = shared (true/false), $2 = timeout seconds -> test right shaped like Apple's admin rights
+  # Class "user" with our mechanisms replacing only the password UI: authd keeps its own logic first (root callers,
+  # credentials the requester already holds, the credential timeout), and asks the admin group membership itself.
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>class</key><string>evaluate-mechanisms</string>
-  <key>comment</key><string>yoga-fp: one dialog, fingerprint or password; root step decides. Restore: sudo ./install.sh disable-admin</string>
+  <key>allow-root</key><true/>
+  <key>class</key><string>user</string>
+  <key>comment</key><string>$MECH_COMMENT</string>
+  <key>group</key><string>admin</string>
   <key>mechanisms</key><array>
     <string>YogaFPAuth:ui</string>
     <string>YogaFPAuth:grant,privileged</string>
@@ -350,6 +356,17 @@ right_def() {   # $1 = shared (true/false), $2 = timeout seconds -> evaluate-mec
   <key>version</key><integer>1</integer>
 </dict></plist>
 EOF
+}
+
+with_mechanisms() {   # $1 = Apple's original definition (plist file) -> the same definition plus our mechanisms
+  local t; t="$(mktemp)"; cp "$1" "$t"
+  /usr/libexec/PlistBuddy -c "Delete :mechanisms" "$t" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Delete :created" -c "Delete :modified" "$t" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :mechanisms array" -c "Add :mechanisms:0 string YogaFPAuth:ui" \
+    -c "Add :mechanisms:1 string YogaFPAuth:grant,privileged" "$t" >/dev/null
+  /usr/libexec/PlistBuddy -c "Delete :comment" "$t" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :comment string $MECH_COMMENT" "$t" >/dev/null
+  cat "$t"; rm -f "$t"
 }
 
 install_authplugin() {
@@ -437,7 +454,7 @@ cmd_enable_admin() {
   [[ -d "$AUTHPLUGIN" ]] || die "plugin missing; run admin-test again"
   local user; user="$(target_user)"
   mkdir -p "$AUTHDB_BACKUP"; chmod 700 "$AUTHDB_BACKUP"
-  local r shared timeout
+  local r
   for r in "${ADMIN_RIGHTS[@]}"; do
     if [[ ! -f "$AUTHDB_BACKUP/$r.plist" ]]; then           # first enable: keep the pristine definition
       security authorizationdb read "$r" > "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || die "could not back up $r"
@@ -456,12 +473,11 @@ cmd_enable_admin() {
     if [[ "$cls" == user && "$grp" == admin ]]; then eligible+=("$r"); else warn "skipping $r (class '$cls', group '$grp')"; fi
   done
   say "Original definitions backed up to $AUTHDB_BACKUP"
-  for r in "${eligible[@]}"; do
-    shared=$(/usr/libexec/PlistBuddy -c "Print :shared" "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || true)
-    timeout=$(/usr/libexec/PlistBuddy -c "Print :timeout" "$AUTHDB_BACKUP/$r.plist" 2>/dev/null || true)
-    [[ "$shared" == true ]] || shared=false
-    [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=0
-    right_def "$shared" "$timeout" | security authorizationdb write "$r" >/dev/null 2>&1 || { cmd_disable_admin; die "writing $r failed; restored"; }
+  for r in "${eligible[@]}"; do    # Apple's definition unchanged (allow-root, timeout, shared, group) + our dialog
+    with_mechanisms "$AUTHDB_BACKUP/$r.plist" | security authorizationdb write "$r" >/dev/null 2>&1 \
+      || { cmd_disable_admin; die "writing $r failed; restored"; }
+    [[ "$(security authorizationdb read "$r" 2>/dev/null | grep -c 'YogaFPAuth:')" == 2 ]] \
+      || { cmd_disable_admin; die "$r was not stored as expected; restored"; }
   done
   if [[ -n "${APP_TESTED:-}" ]]; then
     say "Enabled for ${#eligible[@]} admin prompts (tested by the YogaFP app): ${eligible[*]}"

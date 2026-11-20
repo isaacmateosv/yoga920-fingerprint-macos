@@ -26,7 +26,7 @@ from yogafp import core
 
 SOCK = os.environ.get('YOGAFP_SOCKET', '/var/run/yogafpd.sock')
 DATA = os.environ.get('YOGAFP_DATA', '/Library/Application Support/yoga-fp')
-VERSION = '0.2.0'
+VERSION = '0.2.1'
 
 GRANT_SECONDS = 300
 FAIL_WINDOW, FAIL_MAX, LOCKOUT = 120, 5, 60

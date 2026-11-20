@@ -14,12 +14,13 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 log = logging.getLogger('yogafp')
 
 # ---------------------------------------------------------------- tunables
-THRESHOLD = 10          # RANSAC inliers to accept (default; override in <data>/config.json).
+THRESHOLD = 12          # RANSAC inliers to accept (default; override in <data>/config.json).
+                        # Raised from 10 in 0.2.1: other fingers reached 9, so 10 left a margin of one.
                         # Evaluated 2026-11-18 on a labeled local dataset (31 enroll / 30 own / 30 other):
                         # own finger 70% per touch (97% per sudo with 3 tries), other fingers 0/30 (max 4);
                         # 120 other-finger touches overall, max 9. SIFT+RANSAC beat Gabor-enhanced SIFT,
                         # BLPOC (raw/enhanced) and all fusions (AUC 0.94 vs 0.67-0.94).
-THRESHOLD_MIN = {'best': 10, 'mosaic': 7}   # floors per method (scales differ). Labeled data 2026-11-18:
+THRESHOLD_MIN = {'best': 12, 'mosaic': 7}   # floors per method (scales differ). Labeled data 2026-11-18:
                         # other fingers best<=9 (70 touches), mosaic<=4 (40 touches); own finger mosaic 1-48.
 FINGER_ON = 25.0        # ridge contrast vs blank (no finger ~2.5, finger ~40)
 FINGER_OFF = 8.0

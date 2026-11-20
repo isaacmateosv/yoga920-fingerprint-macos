@@ -29,7 +29,7 @@ firmware cannot match fingerprints on-chip.
   and loaded with Lenovo's `6_07f_Lenovo.xpfwext`.
 * **Matching:** SIFT keypoints on the 112×112 image, RANSAC-consistent match count against 31 guided partial
   touches (7 regions + 2 rotations), plus up to 40 areas learned automatically from certain matches.
-  Default threshold 10.
+  Default threshold 12 (10 until 0.2.1; other fingers reached 9, so 12 keeps a margin).
 
 ### Matcher evaluation
 
@@ -134,7 +134,7 @@ sudo ./install.sh enable-sudo                      # optional: fingerprint for s
 of a false accept). Adding or removing one needs a touch from an already-enrolled finger:
 `yogafp add-finger "Left index"`, `yogafp fingers`, `yogafp remove-finger "Left index"`, or the YogaFP menu.
 
-Tuning: `sudo yogafp set-threshold N` (default 10). Other commands: `sudo ./install.sh update`, `yogafp verify`, `yogafp add 5` (more touches for an area that fails), `yogafp delete`,
+Tuning: `sudo yogafp set-threshold N` (default and minimum 12). Other commands: `sudo ./install.sh update`, `yogafp verify`, `yogafp add 5` (more touches for an area that fails), `yogafp delete`,
 `./install.sh status`, `sudo ./install.sh disable-sudo`, `sudo ./install.sh uninstall [--purge]`.
 After installing, the same commands are available as `sudo /usr/local/libexec/yoga-fp/yogafp-admin.sh ...`.
 
@@ -145,6 +145,10 @@ After installing, the same commands are available as `sudo /usr/local/libexec/yo
 (`system.preferences`) — via an authorization plugin (`authplugin/`, installed in
 `/Library/Security/SecurityAgentPlugins`). One dialog offers both: touch the sensor **or** type your password.
 
+* **Same rules as macOS, different dialog:** each switched right keeps Apple's own definition (admin group,
+  root callers allowed, the 5–15 min reuse window, credentials the requester already holds); the plugin only
+  replaces the password box. So macOS asks exactly when it would have asked anyway (since 0.2.1; 0.2.0 replaced
+  the whole rule and showed extra dialogs, e.g. one per App Store install).
 * **The dialog decides nothing.** It runs in SecurityAgent (as you) and starts a fingerprint verify tagged with a
   random one-time nonce. The **root** step then asks the daemon to consume that nonce: accepted only if the daemon
   itself recorded a real match for that user within 60 s, once. Passwords are checked by the root step with
