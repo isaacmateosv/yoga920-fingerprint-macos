@@ -207,6 +207,8 @@ cmd_install() {
   fi
   mkdir -p "$PAMDIR"; install -m 444 -o root -g wheel "$PREFIX/pam_yogafp.so" "$PAMMOD"
 
+  # A fresh macOS install has no /usr/local/bin.
+  mkdir -p "$(dirname "$BIN")"
   cat > "$BIN" <<EOF
 #!/bin/sh
 exec "$PREFIX/runtime/bin/python3" -I "$PREFIX/yogafp/cli.py" "\$@"
